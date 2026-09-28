@@ -32,3 +32,6 @@ valiguard.db
 validator_wallet_info.txt
 validator_output*.txt
 VALIDATOR_SETUP_GUIDE.md
+
+# Ignore plans folder
+.zcode/
