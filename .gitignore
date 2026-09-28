@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+.env
+
+# JavaScript / Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.next/
+build/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# ValiGuard Specific
+data/valiguard.db
+*.log
+valiguard.db
+
+# QIE Validator
+validator_wallet_info.txt
+validator_output*.txt
+VALIDATOR_SETUP_GUIDE.md
