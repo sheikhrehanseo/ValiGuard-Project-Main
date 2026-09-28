@@ -1,0 +1,16 @@
+{
+  "accuracy": 0.9512,
+  "precision": 0.564,
+  "recall": 0.97,
+  "f1_score": 0.7132,
+  "false_positive_rate": 0.05,
+  "false_negative_rate": 0.03,
+  "true_positives": 97,
+  "true_negatives": 1425,
+  "false_positives": 75,
+  "false_negatives": 3,
+  "total_normal": 1500,
+  "total_anomalies": 100,
+  "model_version": "20260719_020944",
+  "trained_at": "2026-07-18T21:09:45.112032"
+}
