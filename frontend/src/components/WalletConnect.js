@@ -3,7 +3,10 @@
 import { useState, useEffect } from 'react';
 import { ethers } from 'ethers';
 import { User, Wallet, ShieldCheck } from 'lucide-react';
-import { authenticateWallet, getDemoWallet } from '../lib/api';
+import { authenticateWallet, getDemoWallet, setWalletContext, clearWalletContext } from '../lib/api';
+
+// Demo (no-MetaMask) fallback only when explicitly enabled at build time.
+const DEMO_MODE = process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
 
 export default function WalletConnect({ onConnect }) {
     const [walletAddress, setWalletAddress] = useState(null);
@@ -35,6 +38,8 @@ export default function WalletConnect({ onConnect }) {
         setIsAuthenticating(true);
         try {
             await authenticateWallet(address, signMessage);
+            // Register for transparent 401 re-auth in authedFetch.
+            setWalletContext({ address, signMessage });
             setAuthError(null);
         } catch (err) {
             console.error('Backend sign-in failed:', err);
@@ -90,8 +95,9 @@ export default function WalletConnect({ onConnect }) {
                     setError("Connection failed");
                 }
             }
-        } else {
-            // Demo mode: no MetaMask — sign in with a persisted ephemeral wallet.
+        } else if (DEMO_MODE) {
+            // Demo mode (NEXT_PUBLIC_DEMO_MODE=true): no MetaMask — sign in
+            // with a persisted ephemeral wallet.
             console.log("MetaMask unavailable. Using Demo Wallet with backend auth.");
             setTimeout(async () => {
                 try {
@@ -106,6 +112,8 @@ export default function WalletConnect({ onConnect }) {
                     setError("Demo authentication failed");
                 }
             }, 500);
+        } else {
+            setError("No wallet found. Install MetaMask or set NEXT_PUBLIC_DEMO_MODE=true.");
         }
         setIsConnecting(false);
     };
@@ -114,6 +122,7 @@ export default function WalletConnect({ onConnect }) {
         setWalletAddress(null);
         setBalance(null);
         setIsDemo(false);
+        clearWalletContext();
         if (onConnect) onConnect(null);
     };
 

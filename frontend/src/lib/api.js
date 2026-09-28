@@ -39,20 +39,52 @@ export function isAuthenticated() {
     return !!getToken();
 }
 
-// --- Authenticated fetch ---------------------------------------------------
+// --- 401 recovery -----------------------------------------------------------
+
+/**
+ * Wallet context registered by WalletConnect after a successful sign-in so
+ * authedFetch can transparently re-run the auth flow when a token expires.
+ * Shape: { address, signMessage(msg) -> Promise<string> }
+ */
+let walletContext = null;
+
+export function setWalletContext(ctx) {
+    walletContext = ctx;
+}
+
+export function clearWalletContext() {
+    walletContext = null;
+}
 
 /**
  * fetch wrapper that attaches the stored JWT.
+ * On a 401 while a wallet context is registered, clears the stale token,
+ * re-runs the Web3 auth flow (nonce -> sign -> verify), and retries ONCE.
  * Returns the raw Response; callers decide how to handle status codes.
  */
 export async function authedFetch(path, options = {}) {
-    const token = getToken();
-    const headers = {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        ...(options.headers || {}),
+    const doFetch = () => {
+        const token = getToken();
+        const headers = {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            ...(options.headers || {}),
+        };
+        return fetch(`${API_BASE}${path}`, { ...options, headers });
     };
-    return fetch(`${API_BASE}${path}`, { ...options, headers });
+
+    let res = await doFetch();
+
+    if (res.status === 401 && getToken() && walletContext) {
+        setToken(null);
+        try {
+            await authenticateWallet(walletContext.address, walletContext.signMessage);
+            res = await doFetch(); // retry once with the fresh token
+        } catch (err) {
+            console.error('Re-authentication failed:', err);
+        }
+    }
+    return res;
 }
 
 // --- Web3 authentication flow ----------------------------------------------
