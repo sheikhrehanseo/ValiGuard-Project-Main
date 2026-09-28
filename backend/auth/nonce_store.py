@@ -12,16 +12,13 @@ import logging
 import secrets
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 NONCE_TTL_SECONDS = 300  # 5 minutes to sign and submit
 
-
-class NonceStore:
-    """Single-use nonce store with expiry, keyed by wallet address."""
 
 class NonceStore:
     """Single-use nonce store with expiry, keyed by wallet address."""
@@ -97,5 +94,5 @@ def build_sign_message(address: str, nonce: str) -> str:
         "URI: https://valiguard.local\n"
         "Version: 1\n"
         f"Nonce: {nonce}\n"
-        f"Issued At: {datetime.utcnow().isoformat()}Z"
+        f"Issued At: {datetime.now(timezone.utc).isoformat()}"
     )

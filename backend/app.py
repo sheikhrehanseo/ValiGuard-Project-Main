@@ -473,6 +473,7 @@ def get_qie_node_status():
 
 @app.route("/api/v1/qie/validator/info", methods=["GET"])
 @rate_limit
+@require_auth
 def get_validator_info():
     """Get validator information."""
     request_id = generate_request_id()
