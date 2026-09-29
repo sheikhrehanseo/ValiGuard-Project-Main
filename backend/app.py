@@ -290,37 +290,6 @@ db_manager = DatabaseManager(DatabaseConfig())
 db_manager.init_db()
 logger.info(f"Database initialized at {db_manager.config.db_url}")
 
-# ===== INGESTION WORKER (Task 5.3 — Background Ingestion on Boot) =====
-# Start the continuous QIE mempool/block ingestion worker in a daemon
-# background thread when the Flask app boots. Reuse the already-initialized
-# qie_manager / db_manager / anomaly_model singletons so we don't double-init
-# the DB, ML model, or QIENodeManager.
-#
-# Set VALIGUARD_INGESTION_WORKER=0 to disable (e.g. for unit tests).
-#
-# Under the Flask debug reloader the module is imported twice (once in the
-# parent process, once in the child that actually serves requests). We defer
-# startup to the child (WERKZEUG_RUN_MAIN == "true"); in production (gunicorn /
-# uWSGI) there is no reloader so the worker starts once per process.
-ingestion_worker = None
-if os.getenv("VALIGUARD_INGESTION_WORKER", "1") == "1":
-    _is_reloader_parent = (
-        os.getenv("FLASK_ENV") == "development"
-        and os.getenv("WERKZEUG_RUN_MAIN") != "true"
-    )
-    if not _is_reloader_parent:
-        ingestion_worker = IngestionWorker(
-            node_manager=qie_manager,
-            db_manager=db_manager,
-            anomaly_model=anomaly_model,
-            on_new_transaction=_emit_transaction_events,
-        )
-        ingestion_worker.start()
-        logger.info("Ingestion worker started in background thread")
-        _start_node_status_broadcaster()
-    else:
-        logger.info("Ingestion worker deferred to Werkzeug reloader child process")
-
 # ===== WEB3 AUTH ROUTES (UC-01 — nonce → signature → JWT) =====
 register_auth_routes(app)
 
@@ -1107,6 +1076,41 @@ def get_validator_stats():
     }
     return jsonify(success_response(data, request_id)), 200
 
+# ===== BACKGROUND SERVICES =====
+ingestion_worker = None
+_background_services_started = False
+
+
+def start_background_services() -> None:
+    """Start import-time background services after module initialization."""
+    global ingestion_worker, _background_services_started
+
+    if _background_services_started:
+        return
+    _background_services_started = True
+
+    if os.getenv("VALIGUARD_INGESTION_WORKER", "1") != "1":
+        return
+
+    _is_reloader_parent = (
+        os.getenv("FLASK_ENV") == "development"
+        and os.getenv("WERKZEUG_RUN_MAIN") != "true"
+    )
+    if _is_reloader_parent:
+        logger.info("Ingestion worker deferred to Werkzeug reloader child process")
+        return
+
+    ingestion_worker = IngestionWorker(
+        node_manager=qie_manager,
+        db_manager=db_manager,
+        anomaly_model=anomaly_model,
+        on_new_transaction=_emit_transaction_events,
+    )
+    ingestion_worker.start()
+    logger.info("Ingestion worker started in background thread")
+    _start_node_status_broadcaster()
+
+
 # ===== ERROR HANDLERS =====
 @app.errorhandler(404)
 def not_found(error):
@@ -1122,6 +1126,8 @@ def internal_error(error):
     return error_response("Internal server error", "INTERNAL_ERROR", request_id, 500)
 
 # ===== MAIN =====
+start_background_services()
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     debug = os.getenv("FLASK_ENV") == "development"

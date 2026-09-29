@@ -147,13 +147,17 @@ export default function Dashboard() {
             const histData = await histRes.json();
             if (histData.success) {
                 if (histData.data.transactions.length > 0) {
-                    const mappedTxs = histData.data.transactions.map(tx => ({
-                        hash: tx.transaction_hash.substr(0, 10) + "...",
+                    const mappedTxs = histData.data.transactions.map(tx => {
+                        const txHash = tx.tx_hash || tx.transaction_hash || '';
+                        const value = tx.value ?? tx.amount ?? 0;
+                        return {
+                        hash: txHash.substring(0, 10) + "...",
                         type: "BridgeValidation",
                         time: "Just now",
-                        from: "Network",
-                        amt: tx.amount + " Token"
-                    }));
+                        from: tx.sender || "Network",
+                        amt: value + " Token"
+                        };
+                    });
                     setTransactions(mappedTxs);
                 } else {
                     // Keep empty or show 'No Data'
