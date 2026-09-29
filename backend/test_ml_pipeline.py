@@ -271,11 +271,12 @@ class TestSeverityBucketing:
     def test_critical_threshold(self):
         """Test that risk >= 80 produces critical severity."""
         from ml.anomaly_model import AnomalyModel
+        from core.severity import SEVERITY_THRESHOLDS
         
         model = AnomalyModel(model_dir="nonexistent/path")
         
-        # Check internal thresholds
-        assert model.SEVERITY_THRESHOLDS["critical"] == 80
+        # Classification thresholds come from the canonical severity module.
+        assert SEVERITY_THRESHOLDS["critical"] == 80
         
         # Mock internal method
         test_cases = [80, 85, 99, 100]

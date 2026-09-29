@@ -35,14 +35,9 @@ except ImportError:
         FEATURE_EXTRACTION_AVAILABLE = False
         logger.warning("feature_extraction not available")
 
-try:
-    # Canonical 4-tier severity scale (single source of truth, shared with
-    # app.py and the ingestion worker).
-    from core.severity import SEVERITY_THRESHOLDS, severity_from_score
-    SEVERITY_SCALE_AVAILABLE = True
-except ImportError:
-    SEVERITY_SCALE_AVAILABLE = False
-    logger.warning("core.severity not available; using built-in fallback tiers")
+# Canonical 4-tier severity scale (single source of truth, shared with app.py
+# and the ingestion worker).
+from core.severity import severity_from_score
 
 
 class AnomalyModel:
@@ -52,15 +47,6 @@ class AnomalyModel:
     Loads persisted Isolation Forest model and provides scoring interface.
     Falls back gracefully if model not found.
     """
-    
-    # Canonical tier thresholds (backend/core/severity.py). Kept as a class
-    # attribute for backward compatibility with existing tests/code.
-    SEVERITY_THRESHOLDS = {
-        "critical": 80,
-        "high": 60,
-        "medium": 40,
-        "low": 0
-    }
     
     def __init__(self, model_dir: str = "backend/ml/models"):
         """
@@ -254,16 +240,7 @@ class AnomalyModel:
         Returns:
             Canonical severity tier string (lowercase)
         """
-        if SEVERITY_SCALE_AVAILABLE:
-            return severity_from_score(risk_score)
-        if risk_score >= self.SEVERITY_THRESHOLDS["critical"]:
-            return "critical"
-        elif risk_score >= self.SEVERITY_THRESHOLDS["high"]:
-            return "high"
-        elif risk_score >= self.SEVERITY_THRESHOLDS["medium"]:
-            return "medium"
-        else:
-            return "low"
+        return severity_from_score(risk_score)
     
     def _generate_reason(
         self, 

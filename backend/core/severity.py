@@ -25,9 +25,9 @@ SEVERITY_THRESHOLDS = {
     "low": 0.0,
 }
 
-# Tiers at/above which an Alert row is created (aligns with the ingestion
-# worker's flag_threshold of 60 = "high").
-ALERTING_TIERS = ("high", "critical")
+# All four tiers are recorded in anomaly_detections. Alerts and the
+# Transaction.is_flagged flag fire at Medium+.
+ALERTING_TIERS = ("medium", "high", "critical")
 
 
 def severity_from_score(score_0_100: float) -> str:
@@ -50,5 +50,5 @@ def severity_rank(severity: str) -> int:
 
 
 def is_alerting_severity(severity: str) -> bool:
-    """True if the tier warrants an Alert row (High or Critical)."""
+    """True if the tier warrants an Alert row and is_flagged (Medium+)."""
     return str(severity).lower() in ALERTING_TIERS

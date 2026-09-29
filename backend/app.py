@@ -67,7 +67,8 @@ from auth.routes import register_auth_routes
 
 # Canonical 4-tier severity scale (single source of truth)
 from core.severity import (
-    SEVERITY_THRESHOLDS as CANONICAL_SEVERITY_THRESHOLDS,
+    SEVERITY_TIERS,
+    is_alerting_severity,
     severity_from_score as _canonical_severity_from_score,
 )
 
@@ -114,7 +115,7 @@ def _emit_transaction_events(tx: Dict[str, Any]) -> None:
     }
     socketio.emit("new_transaction", payload, to="dashboard")
     # Alert-level events for the live alert feed (matches DB alert rule: High+)
-    if payload["is_flagged"] or payload["severity"] in ("high", "critical"):
+    if payload["is_flagged"] or is_alerting_severity(payload["severity"]):
         socketio.emit("new_alert", {
             "tx_hash": payload["tx_hash"],
             "severity": payload["severity"],
@@ -230,9 +231,19 @@ class BroadcastTransactionRequest(BaseModel):
 class AnomalyReportRequest(BaseModel):
     """Anomaly alert request."""
     transaction_hash: str
-    severity: str = Field(pattern="^(low|medium|high|critical)$")
+    severity: str
     reason: str
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+    @field_validator("severity")
+    @classmethod
+    def validate_severity(cls, value: str) -> str:
+        normalized = value.lower()
+        if normalized not in SEVERITY_TIERS:
+            raise ValueError(
+                "severity must be one of: " + ", ".join(SEVERITY_TIERS)
+            )
+        return normalized
 
 class ValidationRequest(BaseModel):
     """Cross-chain transaction validation request."""
@@ -560,7 +571,7 @@ def validate_cross_chain():
         anomaly_score_100 = score_result["risk_score"]
         confidence = score_result["confidence"]
         severity = score_result["severity"].lower()
-        is_valid = anomaly_score_100 < 60
+        is_valid = not is_alerting_severity(severity)
 
         # Persist to the database (Phase 1 — Database Wiring)
         try:
@@ -577,7 +588,7 @@ def validate_cross_chain():
                     timestamp=validated.timestamp,
                     status=TransactionStatus.CONFIRMED if is_valid else TransactionStatus.FAILED,
                     anomaly_score=anomaly_score_100,
-                    is_flagged=(severity in ("high", "critical")),
+                    is_flagged=is_alerting_severity(severity),
                 )
                 session.add(tx)
                 session.flush()
@@ -668,13 +679,13 @@ def get_anomaly_score():
                         timestamp=datetime.utcnow(),
                         status=TransactionStatus.PENDING,
                         anomaly_score=round(anomaly_score_100, 2),
-                        is_flagged=(severity in ("high", "critical")),
+                        is_flagged=is_alerting_severity(severity),
                     )
                     session.add(tx)
                     session.flush()
                 else:
                     tx.anomaly_score = round(anomaly_score_100, 2)
-                    tx.is_flagged = severity in ("high", "critical")
+                    tx.is_flagged = is_alerting_severity(severity)
                     session.flush()
 
                 tx_id = tx.id
@@ -701,9 +712,8 @@ def get_anomaly_score():
                 )
                 session.add(anomaly)
 
-                # Generate an Alert row when severity reaches High or Critical.
-                # Threshold aligns with severity_from_score (>= 60 = high).
-                if severity in ("high", "critical"):
+                # Generate an Alert row at Medium and above.
+                if is_alerting_severity(severity):
                     alert = Alert(
                         transaction_id=tx.id,
                         alert_type=AlertType.ANOMALY,
