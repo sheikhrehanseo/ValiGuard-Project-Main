@@ -136,8 +136,9 @@ export default function Dashboard() {
             if (statsData.success) {
                 setStats(prev => ({
                     ...prev,
-                    anomalies24h: statsData.data.anomalies_detected,
-                    validationRate: statsData.data.validation_success_rate
+                    anomalies24h: statsData.data.anomalies_detected ?? prev.anomalies24h,
+                    // validation_success_rate is null on an empty day — keep the previous display value
+                    validationRate: statsData.data.validation_success_rate ?? prev.validationRate
                 }));
             }
 

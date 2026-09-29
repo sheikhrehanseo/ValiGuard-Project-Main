@@ -48,18 +48,36 @@ export function isAuthenticated() {
  */
 let walletContext = null;
 
+// Single in-flight re-auth promise shared by ALL parallel 401 responses —
+// a burst of expired-token requests triggers exactly ONE wallet sign prompt.
+let reauthInFlight = null;
+
 export function setWalletContext(ctx) {
     walletContext = ctx;
 }
 
 export function clearWalletContext() {
     walletContext = null;
+    reauthInFlight = null;
+}
+
+async function ensureFreshToken() {
+    if (!reauthInFlight) {
+        reauthInFlight = authenticateWallet(
+            walletContext.address,
+            walletContext.signMessage
+        ).finally(() => {
+            reauthInFlight = null;
+        });
+    }
+    return reauthInFlight;
 }
 
 /**
  * fetch wrapper that attaches the stored JWT.
  * On a 401 while a wallet context is registered, clears the stale token,
- * re-runs the Web3 auth flow (nonce -> sign -> verify), and retries ONCE.
+ * re-runs the Web3 auth flow (nonce -> sign -> verify) — deduped so
+ * parallel 401s share one re-auth — and retries once.
  * Returns the raw Response; callers decide how to handle status codes.
  */
 export async function authedFetch(path, options = {}) {
@@ -78,7 +96,7 @@ export async function authedFetch(path, options = {}) {
     if (res.status === 401 && getToken() && walletContext) {
         setToken(null);
         try {
-            await authenticateWallet(walletContext.address, walletContext.signMessage);
+            await ensureFreshToken();
             res = await doFetch(); // retry once with the fresh token
         } catch (err) {
             console.error('Re-authentication failed:', err);
