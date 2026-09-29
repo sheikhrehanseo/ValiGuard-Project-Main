@@ -235,6 +235,12 @@ export default function Dashboard() {
             setStats(prev => ({ ...prev, anomalies24h: prev.anomalies24h + 1 }));
         });
 
+        socket.on('alert_resolved', (resolved) => {
+            setLiveAlerts(prev => prev.filter(alert => (
+                alert.id !== resolved.alert_id && alert.tx_hash !== resolved.tx_hash
+            )));
+        });
+
         socket.on('node_status', (ns) => {
             setNodeStatus(prev => ({
                 ...prev,

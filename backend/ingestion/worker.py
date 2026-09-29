@@ -20,6 +20,7 @@ from core.severity import (
     is_alerting_severity,
     severity_from_score as _canonical_severity_from_score,
 )
+from core.scoring import score_and_persist_transaction
 
 # Phase 1 DB layer — reuse the same DatabaseManager / session pattern as app.py.
 from database.db import DatabaseManager, DatabaseConfig
@@ -371,14 +372,17 @@ class IngestionWorker:
         # duplicate IntegrityError we keep it marked seen (correct behavior).
         self._seen_hashes.add(tx_hash)
 
-        # Score with the Phase 2 anomaly model.
-        scored = self._score_transaction(normalized)
+        # Score and persist through the canonical path. Its DB session commits
+        # before this callback can emit dashboard events.
+        persisted = self._persist_transaction(normalized)
+        if persisted is None:
+            return None
+        scored = persisted["score"]
         normalized["anomaly_score"] = scored["risk_score"]
-        severity = _severity_from_score(float(scored["risk_score"]))
-        normalized["is_flagged"] = is_alerting_severity(severity)
-
-        # Persist Transaction + AnomalyDetection + (optional) Alert rows.
-        self._persist_transaction(normalized, scored)
+        normalized["risk_score"] = scored["risk_score"]
+        normalized["severity"] = scored["severity"]
+        normalized["reason"] = scored.get("reason")
+        normalized["is_flagged"] = is_alerting_severity(scored["severity"])
 
         if self.on_new_transaction is not None:
             try:
@@ -388,48 +392,15 @@ class IngestionWorker:
 
         return normalized
 
-    def _score_transaction(self, normalized: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Call the Phase 2 anomaly_model.score() on the normalized transaction.
-
-        score() expects an object with .value / .sender / .timestamp attributes
-        (see ml/feature_extraction.py). We adapt our dict to a SimpleNamespace
-        so we don't need a full SQLAlchemy Transaction instance just to score.
-
-        Returns the score dict from AnomalyModel.score() (risk_score,
-        confidence, severity, reason, model_version, ...). On any error, a
-        conservative fallback score is returned so the loop never crashes.
-        """
-        try:
-            adapter = SimpleNamespace(
-                value=normalized.get("value", 0.0),
-                sender=normalized.get("sender", ""),
-                receiver=normalized.get("receiver", ""),
-                timestamp=normalized.get("timestamp") or datetime.utcnow(),
-                tx_hash=normalized.get("tx_hash", ""),
-            )
-            return self.anomaly_model.score(adapter)
-        except Exception as exc:  # noqa: BLE001 — scoring must not kill the loop
-            logger.error("Anomaly scoring failed for %s: %s", normalized.get("tx_hash"), exc)
-            return {
-                "risk_score": 50,
-                "confidence": 0,
-                "severity": "medium",
-                "reason": "Scoring error — conservative default",
-                "model_version": "error",
-                "prediction": "unknown",
-                "features": [],
-            }
-
     def _persist_transaction(
-        self, normalized: Dict[str, Any], scored: Dict[str, Any]
-    ) -> bool:
+        self, normalized: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
         """
         Persist Transaction + AnomalyDetection + (optional) Alert rows using
         the same DatabaseManager.get_session() context manager pattern as
         app.py. Resolves bridge_id via get_or_create_bridge when not provided.
 
-        Returns True on success, False on duplicate tx_hash (IntegrityError).
+        Returns the canonical scoring/persistence result.
         Any other DB error is logged and re-raised so get_session() rolls back
         — but _handle_raw() callers (the loop) catch broadly so the loop lives.
         """
@@ -453,12 +424,10 @@ class IngestionWorker:
                     else TransactionStatus.PENDING
                 )
 
-                risk_score = float(scored.get("risk_score", 0))
-                is_flagged = normalized.get("is_flagged", False)
-
-                tx = Transaction(
+                result = score_and_persist_transaction(
+                    session=session,
+                    anomaly_model=self.anomaly_model,
                     tx_hash=normalized["tx_hash"],
-                    bridge_id=bridge_id,
                     source_chain=normalized.get("source_chain", "QIE"),
                     destination_chain=normalized.get("destination_chain", "QIE"),
                     value=normalized.get("value", 0.0),
@@ -466,50 +435,16 @@ class IngestionWorker:
                     receiver=normalized.get("receiver", ""),
                     timestamp=normalized.get("timestamp") or datetime.utcnow(),
                     status=status_enum,
-                    anomaly_score=risk_score,
-                    is_flagged=is_flagged,
+                    bridge_id=bridge_id,
                 )
-                session.add(tx)
-                session.flush()  # populate tx.id without full commit
 
-                # AnomalyDetection row — always created (records the score).
-                severity_str = (scored.get("severity") or "").lower()
-                severity_enum_val = _severity_enum(_severity_from_score(risk_score))
-                # Prefer the model's own severity string when it maps cleanly.
-                if severity_str in ("low", "medium", "high", "critical"):
-                    severity_enum_val = _severity_enum(severity_str)
-
-                anomaly = AnomalyDetection(
-                    transaction_id=tx.id,
-                    anomaly_score=risk_score,
-                    confidence=float(scored.get("confidence", 0)),
-                    features_used=scored.get("features") or [],
-                    model_version=str(scored.get("model_version", "unknown")),
-                    severity=severity_enum_val,
-                    reason=scored.get("reason"),
-                )
-                session.add(anomaly)
-
-                # Alert row — Medium and above use the canonical alert rule.
-                if is_alerting_severity(severity_enum_val.value):
-                    alert = Alert(
-                        transaction_id=tx.id,
-                        alert_type=AlertType.ANOMALY,
-                        severity=severity_enum_val,
-                        message=(
-                            f"Anomaly detected (score={risk_score:.1f}): "
-                            f"{scored.get('reason', 'flagged by ML model')}"
-                        ),
-                    )
-                    session.add(alert)
-
-            return True
+            return result
         except IntegrityError as exc:
             # Duplicate tx_hash — the unique constraint fired. Skip + log; do
             # NOT crash the loop. The tx is already in _seen_hashes so we
             # won't retry it next iteration.
             logger.warning("Duplicate tx_hash skipped: %s (%s)", normalized.get("tx_hash"), exc.orig)
-            return False
+            return None
 
     def _get_or_create_bridge(self, session, address: Optional[str], chain_name: str) -> Bridge:
         """

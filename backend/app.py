@@ -71,6 +71,7 @@ from core.severity import (
     is_alerting_severity,
     severity_from_score as _canonical_severity_from_score,
 )
+from core.scoring import score_and_persist_transaction
 
 # ===== CONFIGURATION =====
 app = Flask(__name__)
@@ -107,19 +108,23 @@ def _emit_transaction_events(tx: Dict[str, Any]) -> None:
         "receiver": tx.get("receiver"),
         "status": tx.get("status"),
         "anomaly_score": tx.get("anomaly_score"),
+        "risk_score": tx.get("risk_score", tx.get("anomaly_score")),
         "is_flagged": tx.get("is_flagged"),
         "severity": severity_from_score(tx.get("anomaly_score", 0)),
+        "reason": tx.get("reason"),
         "source_chain": tx.get("source_chain"),
         "destination_chain": tx.get("destination_chain"),
         "timestamp": timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp),
     }
     socketio.emit("new_transaction", payload, to="dashboard")
-    # Alert-level events for the live alert feed (matches DB alert rule: High+)
+    # Alert-level events for the live alert feed (matches DB Medium+ rule).
     if payload["is_flagged"] or is_alerting_severity(payload["severity"]):
         socketio.emit("new_alert", {
             "tx_hash": payload["tx_hash"],
             "severity": payload["severity"],
             "anomaly_score": payload["anomaly_score"],
+            "risk_score": payload["risk_score"],
+            "reason": payload["reason"],
             "message": f"Anomaly score {payload['anomaly_score']:.1f} on {payload['tx_hash']}",
             "timestamp": payload["timestamp"],
         }, to="dashboard")
@@ -556,47 +561,28 @@ def validate_cross_chain():
         if error:
             return error
         
-        # Create a minimal transaction object for ML scoring (Task 5.2)
-        class _TxForScoring:
-            """Minimal transaction wrapper for anomaly_model.score()."""
-            def __init__(self, value: float, sender: str, timestamp: datetime):
-                self.value = value
-                self.sender = sender
-                self.timestamp = timestamp
-
-        temp_tx = _TxForScoring(
-            value=float(validated.amount),
-            sender="unknown",
-            timestamp=validated.timestamp
-        )
-
-        # Get real anomaly score from Isolation Forest model (Task 5.2)
-        score_result = anomaly_model.score(temp_tx)
-        anomaly_score_100 = score_result["risk_score"]
-        confidence = score_result["confidence"]
-        severity = score_result["severity"].lower()
-        is_valid = not is_alerting_severity(severity)
-
-        # Persist to the database (Phase 1 — Database Wiring)
         try:
             with db_manager.get_session() as session:
-                bridge = get_or_create_bridge(session, address=None, chain_name=validated.source_chain)
-                tx = Transaction(
+                result = score_and_persist_transaction(
+                    session=session,
+                    anomaly_model=anomaly_model,
                     tx_hash=validated.transaction_hash,
-                    bridge_id=bridge.id,
                     source_chain=validated.source_chain,
                     destination_chain=validated.dest_chain,
                     value=float(validated.amount),
                     sender="unknown",
                     receiver="unknown",
                     timestamp=validated.timestamp,
-                    status=TransactionStatus.CONFIRMED if is_valid else TransactionStatus.FAILED,
-                    anomaly_score=anomaly_score_100,
-                    is_flagged=is_alerting_severity(severity),
+                    status=TransactionStatus.CONFIRMED,
                 )
-                session.add(tx)
+                score_result = result["score"]
+                is_valid = not is_alerting_severity(score_result["severity"])
+                result["transaction"].status = (
+                    TransactionStatus.CONFIRMED
+                    if is_valid
+                    else TransactionStatus.FAILED
+                )
                 session.flush()
-                tx_id = tx.id
         except IntegrityError:
             return error_response(
                 f"Transaction hash already exists: {validated.transaction_hash}",
@@ -604,6 +590,16 @@ def validate_cross_chain():
                 request_id,
                 409,
             )
+
+        anomaly_score_100 = score_result["risk_score"]
+        confidence = score_result["confidence"]
+        severity = score_result["severity"]
+        tx_id = result["transaction"].id
+        _emit_transaction_events({
+            **result["transaction"].to_dict(),
+            "risk_score": anomaly_score_100,
+            "reason": score_result.get("reason"),
+        })
 
         data = {
             "transaction_hash": validated.transaction_hash,
@@ -638,93 +634,22 @@ def get_anomaly_score():
         if not tx_data or "transaction_hash" not in tx_data:
             return error_response("Transaction hash required", "MISSING_FIELD", request_id)
         
-        # Create a minimal transaction object for ML scoring (Task 5.2)
-        class _TxForScoring:
-            """Minimal transaction wrapper for anomaly_model.score()."""
-            def __init__(self, value: float, sender: str, timestamp: datetime):
-                self.value = value
-                self.sender = sender
-                self.timestamp = timestamp
-
-        temp_tx = _TxForScoring(
-            value=float(tx_data.get("amount", tx_data.get("value", 0.0)) or 0.0),
-            sender=tx_data.get("sender", tx_data.get("from_address", "unknown")),
-            timestamp=datetime.utcnow()
-        )
-
-        # Get real anomaly score from Isolation Forest model (Task 5.2)
-        score_result = anomaly_model.score(temp_tx)
-        # Standardize on 0-100 internally; convert only at the response boundary.
-        anomaly_score_100 = float(score_result["risk_score"])
-        severity = score_result["severity"].lower()
-        confidence = score_result["confidence"]
-        reason = score_result["reason"]
-        model_version = score_result["model_version"]
-        extracted_features = score_result.get("features", [])
-
-        # Persist AnomalyDetection + Alert rows (Phase 1 — Database Wiring)
-        tx_id = None
         try:
             with db_manager.get_session() as session:
-                # Look up the transaction by hash; create a lightweight row if it
-                # doesn't exist yet so the AnomalyDetection FK is satisfied.
-                tx = session.query(Transaction).filter_by(tx_hash=tx_data["transaction_hash"]).first()
-                if tx is None:
-                    source_chain = tx_data.get("source_chain", "QIE")
-                    bridge = get_or_create_bridge(session, address=None, chain_name=source_chain)
-                    tx = Transaction(
-                        tx_hash=tx_data["transaction_hash"],
-                        bridge_id=bridge.id,
-                        source_chain=source_chain,
-                        destination_chain=tx_data.get("dest_chain", tx_data.get("destination_chain", "unknown")),
-                        value=float(tx_data.get("amount", tx_data.get("value", 0.0)) or 0.0),
-                        sender=tx_data.get("sender", tx_data.get("from_address", "unknown")),
-                        receiver=tx_data.get("receiver", tx_data.get("to_address", "unknown")),
-                        timestamp=datetime.utcnow(),
-                        status=TransactionStatus.PENDING,
-                        anomaly_score=round(anomaly_score_100, 2),
-                        is_flagged=is_alerting_severity(severity),
-                    )
-                    session.add(tx)
-                    session.flush()
-                else:
-                    tx.anomaly_score = round(anomaly_score_100, 2)
-                    tx.is_flagged = is_alerting_severity(severity)
-                    session.flush()
-
-                tx_id = tx.id
-
-                # Persist the actual extracted feature vector for audit/debug.
-                feature_names = (
-                    anomaly_model.feature_extractor.get_feature_names()
-                    if anomaly_model.feature_extractor else
-                    ["value_normalized", "frequency_deviation", "hour_sin", "hour_cos", "day_sin", "day_cos"]
+                result = score_and_persist_transaction(
+                    session=session,
+                    anomaly_model=anomaly_model,
+                    tx_hash=tx_data["transaction_hash"],
+                    source_chain=tx_data.get("source_chain", "QIE"),
+                    destination_chain=tx_data.get(
+                        "dest_chain", tx_data.get("destination_chain", "unknown")
+                    ),
+                    value=float(tx_data.get("amount", tx_data.get("value", 0.0)) or 0.0),
+                    sender=tx_data.get("sender", tx_data.get("from_address", "unknown")),
+                    receiver=tx_data.get("receiver", tx_data.get("to_address", "unknown")),
+                    timestamp=datetime.utcnow(),
+                    status=TransactionStatus.PENDING,
                 )
-                features_used = {
-                    name: float(val)
-                    for name, val in zip(feature_names, extracted_features)
-                } if extracted_features else {}
-
-                anomaly = AnomalyDetection(
-                    transaction_id=tx.id,
-                    anomaly_score=anomaly_score_100,
-                    confidence=confidence,
-                    features_used=features_used,
-                    model_version=model_version,
-                    severity=severity_enum(severity),
-                    reason=reason,
-                )
-                session.add(anomaly)
-
-                # Generate an Alert row at Medium and above.
-                if is_alerting_severity(severity):
-                    alert = Alert(
-                        transaction_id=tx.id,
-                        alert_type=AlertType.ANOMALY,
-                        severity=severity_enum(severity),
-                        message=f"Anomaly score {round(anomaly_score_100, 2)} ({severity}): {reason}",
-                    )
-                    session.add(alert)
         except IntegrityError:
             return error_response(
                 f"Transaction hash already exists: {tx_data['transaction_hash']}",
@@ -732,6 +657,18 @@ def get_anomaly_score():
                 request_id,
                 409,
             )
+
+        score_result = result["score"]
+        anomaly_score_100 = float(score_result["risk_score"])
+        severity = score_result["severity"]
+        confidence = score_result["confidence"]
+        reason = score_result["reason"]
+        tx_id = result["transaction"].id
+        _emit_transaction_events({
+            **result["transaction"].to_dict(),
+            "risk_score": anomaly_score_100,
+            "reason": reason,
+        })
         
         data = {
             "transaction_hash": tx_data.get("transaction_hash"),
@@ -850,6 +787,108 @@ def send_anomaly_alert():
     except Exception as e:
         logger.error(f"Error sending alert: {e}")
         return error_response(str(e), "ALERT_ERROR", request_id)
+
+
+def _parse_alert_datetime(value: Optional[str], field_name: str) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be an ISO-8601 datetime") from exc
+
+
+@app.route("/api/v1/alerts", methods=["GET"])
+@rate_limit
+@require_auth
+def get_alerts():
+    """Query persisted alerts with explicit audit filters and pagination."""
+    request_id = generate_request_id()
+    severity = request.args.get("severity")
+    if severity and severity.lower() not in SEVERITY_TIERS:
+        return error_response("Invalid severity filter", "INVALID_SEVERITY", request_id, 400)
+
+    resolved = request.args.get("resolved")
+    resolved_value = None
+    if resolved is not None:
+        if resolved.lower() not in ("true", "false"):
+            return error_response("resolved must be true or false", "INVALID_RESOLVED", request_id, 400)
+        resolved_value = resolved.lower() == "true"
+
+    try:
+        from_date = _parse_alert_datetime(request.args.get("from"), "from")
+        to_date = _parse_alert_datetime(request.args.get("to"), "to")
+        limit = int(request.args.get("limit", 50))
+        offset = int(request.args.get("offset", 0))
+    except ValueError as exc:
+        return error_response(str(exc), "INVALID_FILTER", request_id, 400)
+
+    if limit < 1 or limit > 100 or offset < 0:
+        return error_response("limit must be 1-100 and offset must be non-negative", "INVALID_PAGINATION", request_id, 400)
+    if from_date and to_date and from_date > to_date:
+        return error_response("from must be earlier than to", "INVALID_DATE_RANGE", request_id, 400)
+
+    with db_manager.get_session() as session:
+        query = session.query(Alert).join(Transaction)
+        if severity:
+            query = query.filter(Alert.severity == SeverityLevel(severity.lower()))
+        if from_date:
+            query = query.filter(Alert.created_at >= from_date)
+        if to_date:
+            query = query.filter(Alert.created_at <= to_date)
+        if resolved_value is not None:
+            query = query.filter(Alert.is_resolved == resolved_value)
+        if request.args.get("tx_hash"):
+            query = query.filter(Transaction.tx_hash == request.args["tx_hash"])
+
+        total = query.count()
+        rows = query.order_by(Alert.created_at.desc()).offset(offset).limit(limit).all()
+        items = []
+        for alert in rows:
+            anomaly = max(
+                alert.transaction.anomalies,
+                key=lambda item: item.detected_at or datetime.min,
+                default=None,
+            )
+            item = alert.to_dict()
+            item.update({
+                "tx_hash": alert.transaction.tx_hash,
+                "reason": anomaly.reason if anomaly else None,
+                "anomaly_score": anomaly.anomaly_score if anomaly else alert.transaction.anomaly_score,
+            })
+            items.append(item)
+
+    return jsonify(success_response({
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "alerts": items,
+    }, request_id)), 200
+
+
+@app.route("/api/v1/alerts/<int:alert_id>/resolve", methods=["PATCH"])
+@rate_limit
+@require_auth
+def resolve_alert(alert_id: int):
+    """Resolve an alert and notify connected dashboards after commit."""
+    request_id = generate_request_id()
+    resolved_at = datetime.utcnow()
+    with db_manager.get_session() as session:
+        alert = session.query(Alert).filter_by(id=alert_id).first()
+        if alert is None:
+            return error_response("Alert not found", "ALERT_NOT_FOUND", request_id, 404)
+        alert.is_resolved = True
+        alert.resolved_at = resolved_at
+        tx_hash = alert.transaction.tx_hash
+
+    payload = {
+        "alert_id": alert_id,
+        "tx_hash": tx_hash,
+        "is_resolved": True,
+        "resolved_at": resolved_at.isoformat(),
+    }
+    socketio.emit("alert_resolved", payload, to="dashboard")
+    return jsonify(success_response(payload, request_id)), 200
 
 # ===== ANALYTICS ENDPOINTS =====
 @app.route("/api/v1/analytics/daily-stats", methods=["GET"])
