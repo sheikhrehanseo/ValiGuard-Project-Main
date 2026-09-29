@@ -16,7 +16,10 @@ from ml.anomaly_model import AnomalyModel, get_model as get_anomaly_model
 
 # Canonical 4-tier severity scale (single source of truth — shared with app.py
 # and ml/anomaly_model.py; do not re-implement thresholds here).
-from core.severity import severity_from_score as _canonical_severity_from_score
+from core.severity import (
+    is_alerting_severity,
+    severity_from_score as _canonical_severity_from_score,
+)
 
 # Phase 1 DB layer — reuse the same DatabaseManager / session pattern as app.py.
 from database.db import DatabaseManager, DatabaseConfig
@@ -219,7 +222,6 @@ class IngestionWorker:
         max_backoff: float = 60.0,
         bridge_id: Optional[int] = None,
         default_bridge_chain: str = "QIE",
-        flag_threshold: float = 60.0,
         on_new_transaction: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
         """
@@ -237,8 +239,6 @@ class IngestionWorker:
                 None, a default bridge is get_or_create'd per source chain
                 (same helper pattern as app.py).
             default_bridge_chain: Chain name used when creating a default bridge.
-            flag_threshold: Risk score (0-100) at/above which a transaction is
-                flagged (is_flagged=True) and an Alert row is created.
             on_new_transaction: Optional callback invoked once per newly
                 normalized+scored+persisted transaction with the final dict
                 (including anomaly_score / is_flagged). Used by callers/tests
@@ -260,7 +260,6 @@ class IngestionWorker:
         self.max_backoff = max_backoff
         self.bridge_id = bridge_id
         self.default_bridge_chain = default_bridge_chain
-        self.flag_threshold = flag_threshold
         self.on_new_transaction = on_new_transaction
 
         # In-memory de-duplication of tx_hash across iterations. The DB unique
@@ -375,7 +374,8 @@ class IngestionWorker:
         # Score with the Phase 2 anomaly model.
         scored = self._score_transaction(normalized)
         normalized["anomaly_score"] = scored["risk_score"]
-        normalized["is_flagged"] = scored["risk_score"] >= self.flag_threshold
+        severity = _severity_from_score(float(scored["risk_score"]))
+        normalized["is_flagged"] = is_alerting_severity(severity)
 
         # Persist Transaction + AnomalyDetection + (optional) Alert rows.
         self._persist_transaction(normalized, scored)
@@ -490,8 +490,8 @@ class IngestionWorker:
                 )
                 session.add(anomaly)
 
-                # Alert row — only when the transaction is flagged.
-                if is_flagged:
+                # Alert row — Medium and above use the canonical alert rule.
+                if is_alerting_severity(severity_enum_val.value):
                     alert = Alert(
                         transaction_id=tx.id,
                         alert_type=AlertType.ANOMALY,

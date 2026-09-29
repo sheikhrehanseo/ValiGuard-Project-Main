@@ -155,7 +155,8 @@ export default function Dashboard() {
                         type: "BridgeValidation",
                         time: "Just now",
                         from: tx.sender || "Network",
-                        amt: value + " Token"
+                        amt: value + " Token",
+                        severity: tx.severity
                         };
                     });
                     setTransactions(mappedTxs);
@@ -527,16 +528,16 @@ export default function Dashboard() {
                                         <div className="bg-slate-800 rounded-2xl border border-slate-700 p-6 shadow-xl">
                                             <h3 className="text-lg font-semibold mb-4">Risk Distribution</h3>
                                             <div className="h-64 flex flex-col justify-center gap-4">
-                                                {['Low Risk', 'Medium Risk', 'High Risk'].map((label, i) => (
+                                                {['Low Risk', 'Medium Risk', 'High Risk', 'Critical Risk'].map((label, i) => (
                                                     <div key={label}>
                                                         <div className="flex justify-between text-sm mb-1 text-slate-400">
                                                             <span>{label}</span>
-                                                            <span>{['85%', '12%', '3%'][i]}</span>
+                                                            <span>{['75%', '15%', '7%', '3%'][i]}</span>
                                                         </div>
                                                         <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
                                                             <div
-                                                                className={`h-full rounded-full ${['bg-green-500', 'bg-yellow-500', 'bg-red-500'][i]}`}
-                                                                style={{ width: ['85%', '12%', '3%'][i] }}
+                                                                className={`h-full rounded-full ${['bg-blue-500', 'bg-yellow-500', 'bg-orange-500', 'bg-red-500'][i]}`}
+                                                                style={{ width: ['75%', '15%', '7%', '3%'][i] }}
                                                             ></div>
                                                         </div>
                                                     </div>
@@ -567,6 +568,7 @@ export default function Dashboard() {
                                                     <th className="p-4">Age</th>
                                                     <th className="p-4">From</th>
                                                     <th className="p-4">Amount</th>
+                                                    <th className="p-4">Risk</th>
                                                 </tr>
                                             </thead>
                                             <tbody className="divide-y divide-slate-700">
@@ -577,6 +579,13 @@ export default function Dashboard() {
                                                         <td className="p-4 text-slate-400">{tx.time}</td>
                                                         <td className="p-4 font-mono text-slate-400">{tx.from}</td>
                                                         <td className="p-4 font-medium">{tx.amt}</td>
+                                                        <td className="p-4">
+                                                            {tx.severity ? (
+                                                                <span className={`px-2 py-1 rounded text-xs font-semibold ${SEVERITY_STYLES[tx.severity]?.bg || 'bg-slate-700'} ${SEVERITY_STYLES[tx.severity]?.text || 'text-slate-300'}`}>
+                                                                    {SEVERITY_STYLES[tx.severity]?.label || tx.severity}
+                                                                </span>
+                                                            ) : <span className="text-slate-500">-</span>}
+                                                        </td>
                                                     </tr>
                                                 ))}
                                             </tbody>
@@ -714,7 +723,7 @@ export default function Dashboard() {
                                 >
                                     {liveAlerts.length === 0 && (
                                         <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl text-slate-400 text-sm">
-                                            No live alerts yet. Alerts appear here in real time (High/Critical) as the ingestion worker scores transactions.
+                                            No live alerts yet. Alerts appear here in real time as the ingestion worker scores transactions.
                                         </div>
                                     )}
                                     {liveAlerts.map((alert, i) => {
@@ -725,7 +734,7 @@ export default function Dashboard() {
                                                 <Icon className={`${style.text} w-6 h-6 shrink-0 mt-1`} />
                                                 <div>
                                                     <h4 className={`font-bold ${style.text} capitalize`}>
-                                                        {alert.severity} anomaly detected
+                                                        {style.label} anomaly detected
                                                     </h4>
                                                     <p className="text-slate-300 text-sm mt-1">{alert.message}</p>
                                                     <div className="mt-2 text-xs text-slate-500 flex items-center gap-2">

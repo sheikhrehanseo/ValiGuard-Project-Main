@@ -14,6 +14,7 @@ import logging
 from sqlalchemy import create_engine, inspect, text, event
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import StaticPool
+from core.severity import is_alerting_severity, severity_from_score
 try:
     import alembic.config
     import alembic.command
@@ -444,7 +445,9 @@ class SeedData:
                 receiver=f"0x{'d' * (40 - len(str(i)))}{i}",
                 status=TransactionStatus.CONFIRMED if i % 3 != 0 else TransactionStatus.PENDING,
                 anomaly_score=10.0 if i % 5 != 0 else 75.0,
-                is_flagged=i % 5 == 0
+                is_flagged=is_alerting_severity(
+                    severity_from_score(75.0 if i % 5 == 0 else 10.0)
+                )
             )
             session.add(tx)
             transactions.append(tx)
@@ -463,7 +466,9 @@ class SeedData:
         severity_levels = [SeverityLevel.LOW, SeverityLevel.MEDIUM, SeverityLevel.HIGH, SeverityLevel.CRITICAL]
         
         for i, tx in enumerate(transactions):
-            if tx.is_flagged or tx.anomaly_score > 50:
+            if tx.is_flagged or is_alerting_severity(
+                severity_from_score(tx.anomaly_score)
+            ):
                 anomaly = AnomalyDetection(
                     transaction_id=tx.id,
                     anomaly_score=tx.anomaly_score,
