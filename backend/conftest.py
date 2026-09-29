@@ -3,9 +3,13 @@ Shared pytest fixtures for the ValiGuard backend test suite.
 """
 
 import sys
+import os
 from pathlib import Path
 
 import pytest
+
+# Never start the background ingestion worker from a test process.
+os.environ.setdefault("VALIGUARD_INGESTION_WORKER", "0")
 
 sys.path.insert(0, str(Path(__file__).parent))
 

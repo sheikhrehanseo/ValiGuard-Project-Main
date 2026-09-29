@@ -895,27 +895,27 @@ def get_daily_stats():
             AnomalyDetection.detected_at < next_date
         ).count()
 
-        # Compute validation success rate: (non-flagged / total) * 100
+        # Compute validation success rate: (non-flagged / total) * 100.
+        # No transactions for the day -> None (honest empty state, not 100%).
         flagged_count = session.query(Transaction).filter(
             Transaction.timestamp >= target_date,
             Transaction.timestamp < next_date,
             Transaction.is_flagged == True
         ).count()
-        if total_transactions > 0:
-            validation_success_rate = round(
-                ((total_transactions - flagged_count) / total_transactions) * 100, 2
-            )
-        else:
-            validation_success_rate = 100.0
+        validation_success_rate = (
+            round(((total_transactions - flagged_count) / total_transactions) * 100, 2)
+            if total_transactions > 0
+            else None
+        )
 
-        # Average anomaly score for the day (proxy for avg_validation_time_ms until Phase 2)
+        # Average anomaly score for the day
         avg_score_result = session.query(AnomalyDetection).filter(
             AnomalyDetection.detected_at >= target_date,
             AnomalyDetection.detected_at < next_date
         ).with_entities(
             func.avg(AnomalyDetection.anomaly_score)
         ).scalar()
-        avg_validation_time_ms = round(float(avg_score_result or 0), 2)
+        avg_anomaly_score = round(float(avg_score_result or 0), 2)
 
         # Alert counts by severity
         critical_alerts = session.query(Alert).filter(
@@ -935,21 +935,22 @@ def get_daily_stats():
         "total_transactions": total_transactions,
         "anomalies_detected": anomalies_detected,
         "validation_success_rate": validation_success_rate,
-        "avg_validation_time_ms": avg_validation_time_ms,
+        "avg_anomaly_score": avg_anomaly_score,
         "critical_alerts": critical_alerts,
         "high_alerts": high_alerts
     }
 
     return jsonify(success_response(data, request_id)), 200
 
-def _load_model_metrics() -> Dict[str, Any]:
+def _load_model_metrics(metrics_path: Optional[str] = None) -> Dict[str, Any]:
     """
     Load the real evaluation metrics written by ml/train_model.py
     (metrics_latest.json sits next to the trained model artifact).
     """
-    metrics_path = os.path.join(
-        os.path.dirname(__file__), "ml", "models", "metrics_latest.json"
-    )
+    if metrics_path is None:
+        metrics_path = os.path.join(
+            os.path.dirname(__file__), "ml", "models", "metrics_latest.json"
+        )
     try:
         with open(metrics_path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -973,11 +974,76 @@ def get_model_accuracy():
     request_id = generate_request_id()
     return jsonify(success_response(_load_model_metrics(), request_id)), 200
 
+# Telemetry cache: a down node costs a 3s probe at most once per TTL window,
+# instead of ~22s (retrying session) on every analytics request.
+NODE_TELEMETRY_TTL_SECONDS = 30
+_node_telemetry_cache: Dict[str, Any] = {"data": None, "fetched_at": 0.0}
+
+
+def _probe_node_telemetry() -> Dict[str, Any]:
+    """
+    Single fast Tendermint /status probe (plain requests, no retry adapter,
+    3s timeout). Never raises.
+    """
+    base = {
+        "available": False,
+        "online": False,
+        "synced": False,
+        "block_height": 0,
+        "chain_id": qie_manager.chain_id,
+        "rpc_url": qie_manager.rpc_url,
+    }
+    try:
+        response = requests.post(
+            qie_manager.rpc_url,
+            json={"jsonrpc": "2.0", "id": 1, "method": "status", "params": {}},
+            timeout=3,
+        )
+        response.raise_for_status()
+        result = response.json().get("result", {}) or {}
+        sync_info = result.get("sync_info", {}) or {}
+        return {
+            **base,
+            "available": True,
+            "online": True,
+            "synced": not bool(sync_info.get("catching_up", True)),
+            "block_height": int(sync_info.get("latest_block_height", 0) or 0),
+            "moniker": (result.get("node_info", {}) or {}).get("moniker", ""),
+        }
+    except Exception as exc:  # noqa: BLE001 — analytics must not fail on RPC
+        logger.debug(f"Node telemetry probe failed: {exc}")
+        return base
+
+
+def _fetch_node_telemetry() -> Dict[str, Any]:
+    """
+    Live node telemetry for the analytics endpoints, cached for
+    NODE_TELEMETRY_TTL_SECONDS. Never raises: when the QIE node is
+    unreachable, returns available=False with neutral values so analytics
+    still serve DB aggregates.
+    """
+    now = time.time()
+    if (
+        _node_telemetry_cache["data"] is not None
+        and now - _node_telemetry_cache["fetched_at"] < NODE_TELEMETRY_TTL_SECONDS
+    ):
+        return _node_telemetry_cache["data"]
+    data = _probe_node_telemetry()
+    _node_telemetry_cache["data"] = data
+    _node_telemetry_cache["fetched_at"] = now
+    return data
+
+
 @app.route("/api/v1/analytics/validator-stats", methods=["GET"])
 @rate_limit
 @require_auth
 def get_validator_stats():
-    """Get validator stats from the database (validators table aggregates)."""
+    """
+    Validator stats from real sources only:
+      - DB aggregates from the validators table (count, active, uptime, stake)
+      - Per-validator transaction/alert counts joined on Transaction.sender
+      - Live node telemetry (sync status, block height) with graceful fallback
+    """
     request_id = generate_request_id()
 
     with db_manager.get_session() as session:
@@ -991,18 +1057,32 @@ def get_validator_stats():
         total_staked_result = session.query(
             func.sum(Validator.stake_amount)
         ).scalar()
+        transactions_total = session.query(Transaction).count()
+        alerts_total = session.query(Alert).count()
+        alerts_unresolved = session.query(Alert).filter(
+            Alert.is_resolved == False
+        ).count()
 
         top_validators_rows = session.query(Validator).order_by(
             Validator.stake_amount.desc()
         ).limit(5).all()
-        top_validators_rows = session.query(Validator).order_by(
-            Validator.stake_amount.desc()
-        ).limit(5).all()
-        top_validators = []
         total_stake = float(total_staked_result or 0)
+        top_validators = []
         for v in top_validators_rows:
             stake = float(v.stake_amount or 0)
-            voting_power = round((stake / total_stake) * 100, 2) if total_stake > 0 else 0.0
+            voting_power = (
+                round((stake / total_stake) * 100, 2) if total_stake > 0 else 0.0
+            )
+            # Per-validator counts: a QIE validator's own transactions use its
+            # qie1... address as sender. Zero when it originated none.
+            tx_count = session.query(Transaction).filter(
+                Transaction.sender == v.address
+            ).count()
+            alert_count = session.query(Alert).join(
+                Transaction, Alert.transaction_id == Transaction.id
+            ).filter(
+                Transaction.sender == v.address
+            ).count()
             top_validators.append({
                 "address": v.address,
                 "name": v.name,
@@ -1010,6 +1090,8 @@ def get_validator_stats():
                 "voting_power": voting_power,
                 "uptime": round(float(v.uptime_percentage or 0), 2),
                 "is_active": v.is_active,
+                "transactions": tx_count,
+                "alerts": alert_count,
             })
 
     data = {
@@ -1017,7 +1099,11 @@ def get_validator_stats():
         "active_validators": active_validators,
         "avg_uptime": round(float(avg_uptime_result or 0), 2),
         "total_staked": f"{round(float(total_staked_result or 0))} aqie",
+        "transactions_total": transactions_total,
+        "alerts_total": alerts_total,
+        "alerts_unresolved": alerts_unresolved,
         "top_validators": top_validators,
+        "node": _fetch_node_telemetry(),
     }
     return jsonify(success_response(data, request_id)), 200
 
