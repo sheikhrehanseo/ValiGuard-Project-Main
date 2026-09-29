@@ -312,13 +312,12 @@ def _start_node_status_broadcaster(interval: float = 10.0) -> None:
     def _broadcast():
         while True:
             try:
-                status = qie_manager.get_node_status()
-                health = qie_manager.check_node_health()
+                telemetry = _fetch_node_telemetry()
                 socketio.emit("node_status", {
-                    "online": status.get("online", False),
-                    "healthy": health.get("healthy", False),
-                    "height": health.get("height", 0),
-                    "syncing": not health.get("healthy", False),
+                    "online": telemetry.get("online", False),
+                    "healthy": telemetry.get("synced", False),
+                    "height": telemetry.get("block_height", 0),
+                    "syncing": not telemetry.get("synced", False),
                     "rpc_url": qie_manager.rpc_url,
                     "chain_id": qie_manager.chain_id,
                 }, to="dashboard")
@@ -429,22 +428,27 @@ def get_qie_node_status():
     request_id = generate_request_id()
     
     try:
-        health = qie_manager.check_node_health()
-        status = qie_manager.get_node_status()
+        telemetry = _fetch_node_telemetry()
         
         data = {
             "node": {
-                "online": status.get("online", False),
-                "healthy": health.get("healthy", False),
-                "height": health.get("height", 0),
-                "syncing": not health.get("healthy", False),
+                "online": telemetry.get("online", False),
+                "healthy": telemetry.get("synced", False),
+                "height": telemetry.get("block_height", 0),
+                "syncing": not telemetry.get("synced", False),
                 "rpc_url": qie_manager.rpc_url,
                 "chain_id": qie_manager.chain_id
             },
-            "response": status.get("data", {})
+            "response": {
+                "node_info": {"moniker": telemetry.get("moniker", "")},
+                "sync_info": {
+                    "latest_block_height": telemetry.get("block_height", 0),
+                    "catching_up": not telemetry.get("synced", False),
+                },
+            }
         }
         
-        logger.info(f"QIE node status check: {health}")
+        logger.info(f"QIE node status check: {telemetry}")
         return jsonify(success_response(data, request_id)), 200
     
     except Exception as e:
@@ -1013,6 +1017,41 @@ def _fetch_node_telemetry() -> Dict[str, Any]:
     return data
 
 
+def _fetch_chain_voting_power() -> Dict[str, float]:
+    """Return chain-reported voting power as percentages keyed by address."""
+    try:
+        result = qie_manager.get_validator_set()
+    except Exception as exc:  # noqa: BLE001 — DB fallback must remain available
+        logger.debug("Validator-set RPC failed: %s", exc)
+        return {}
+
+    if not result.get("success"):
+        return {}
+
+    raw_values = {}
+    for validator in result.get("validators", []):
+        address = (
+            validator.get("address")
+            or validator.get("operator_address")
+            or validator.get("account_address")
+        )
+        power = validator.get("voting_power", validator.get("power"))
+        if address is None or power is None:
+            continue
+        try:
+            raw_values[str(address).lower()] = float(power)
+        except (TypeError, ValueError):
+            continue
+
+    total_power = sum(raw_values.values())
+    if total_power <= 0:
+        return {}
+    return {
+        address: round(power / total_power * 100, 2)
+        for address, power in raw_values.items()
+    }
+
+
 @app.route("/api/v1/analytics/validator-stats", methods=["GET"])
 @rate_limit
 @require_auth
@@ -1024,6 +1063,7 @@ def get_validator_stats():
       - Live node telemetry (sync status, block height) with graceful fallback
     """
     request_id = generate_request_id()
+    chain_voting_power = _fetch_chain_voting_power()
 
     with db_manager.get_session() as session:
         total_validators = session.query(Validator).count()
@@ -1049,8 +1089,12 @@ def get_validator_stats():
         top_validators = []
         for v in top_validators_rows:
             stake = float(v.stake_amount or 0)
-            voting_power = (
+            db_voting_power = (
                 round((stake / total_stake) * 100, 2) if total_stake > 0 else 0.0
+            )
+            voting_power = chain_voting_power.get(v.address.lower(), db_voting_power)
+            voting_power_source = (
+                "rpc" if v.address.lower() in chain_voting_power else "db"
             )
             # Per-validator counts: a QIE validator's own transactions use its
             # qie1... address as sender. Zero when it originated none.
@@ -1067,6 +1111,7 @@ def get_validator_stats():
                 "name": v.name,
                 "stake_amount": v.stake_amount,
                 "voting_power": voting_power,
+                "source": voting_power_source,
                 "uptime": round(float(v.uptime_percentage or 0), 2),
                 "is_active": v.is_active,
                 "transactions": tx_count,
