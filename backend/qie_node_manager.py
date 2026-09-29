@@ -355,6 +355,55 @@ class QIENodeManager:
                 "message": f"Error: {str(e)}",
                 "data": {}
             }
+
+    def get_validator_set(
+        self, per_page: int = 100, max_pages: int = 100
+    ) -> Dict[str, Any]:
+        """Get the validator set from Tendermint's paginated GET endpoint."""
+        validators: List[Dict[str, Any]] = []
+        block_height = 0
+        base_url = self.rpc_url.rstrip("/")
+
+        try:
+            for page in range(1, max_pages + 1):
+                response = requests.get(
+                    f"{base_url}/validators",
+                    params={"page": page, "per_page": per_page},
+                    timeout=3,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                result = payload.get("result", payload) or {}
+                page_validators = result.get("validators") or []
+                validators.extend(page_validators)
+                block_height = int(result.get("block_height", block_height) or 0)
+
+                total = int(
+                    result.get("total", result.get("count_total", 0)) or 0
+                )
+                if (
+                    not page_validators
+                    or len(validators) >= total > 0
+                    or len(page_validators) < per_page
+                ):
+                    break
+
+            return {
+                "success": True,
+                "validators": validators,
+                "block_height": block_height,
+                "total": len(validators),
+                "message": "Validator set retrieved successfully",
+            }
+        except Exception as e:
+            logger.warning(f"Unable to retrieve validator set: {e}")
+            return {
+                "success": False,
+                "validators": [],
+                "block_height": block_height,
+                "total": 0,
+                "message": f"Validator set unavailable: {e}",
+            }
     
     def query_balance(self, address: str) -> Dict[str, Any]:
         """

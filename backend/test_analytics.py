@@ -210,6 +210,41 @@ class TestValidatorStatsSeeded:
         assert data["top_validators"][1]["transactions"] == 0
         assert data["top_validators"][1]["alerts"] == 0
 
+    def test_voting_power_uses_rpc_and_marks_source(self, client, token, monkeypatch):
+        monkeypatch.setattr(
+            flask_app_module.qie_manager,
+            "get_validator_set",
+            lambda: {
+                "success": True,
+                "validators": [
+                    {"address": "qie1valone", "voting_power": "60"},
+                    {"address": "qie1valtwo", "voting_power": "30"},
+                    {"address": "qie1valthree", "voting_power": "10"},
+                ],
+            },
+        )
+
+        r = client.get("/api/v1/analytics/validator-stats", headers=_auth(token))
+        data = r.get_json()["data"]
+
+        assert r.status_code == 200
+        assert data["top_validators"][0]["voting_power"] == 60.0
+        assert data["top_validators"][0]["source"] == "rpc"
+
+    def test_voting_power_falls_back_to_db_and_marks_source(self, client, token, monkeypatch):
+        monkeypatch.setattr(
+            flask_app_module.qie_manager,
+            "get_validator_set",
+            lambda: {"success": False, "validators": []},
+        )
+
+        r = client.get("/api/v1/analytics/validator-stats", headers=_auth(token))
+        data = r.get_json()["data"]
+
+        assert r.status_code == 200
+        assert data["top_validators"][0]["voting_power"] == 66.67
+        assert data["top_validators"][0]["source"] == "db"
+
     def test_node_telemetry_degrades_gracefully(self, client, token):
         r = client.get("/api/v1/analytics/validator-stats", headers=_auth(token))
         data = r.get_json()["data"]
