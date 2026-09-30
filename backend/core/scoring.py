@@ -10,7 +10,6 @@ from database.models import (
     AlertType,
     AnomalyDetection,
     Bridge,
-    BridgeStatus,
     SeverityLevel,
     Transaction,
     TransactionStatus,
@@ -21,30 +20,16 @@ def _severity_enum(value: str) -> SeverityLevel:
     return SeverityLevel(str(value).lower())
 
 
-def _get_or_create_bridge(session, chain_name: str) -> Bridge:
-    address = f"bridge:{(chain_name or 'QIE').lower()}:default"
-    bridge = session.query(Bridge).filter_by(address=address).first()
-    if bridge is None:
-        bridge = Bridge(
-            address=address,
-            chain_name=chain_name or "QIE",
-            status=BridgeStatus.ACTIVE,
-        )
-        session.add(bridge)
-        session.flush()
-    return bridge
-
-
 def score_and_persist_transaction(
     *,
     session,
     anomaly_model,
     tx_hash: str,
-    source_chain: str,
-    destination_chain: str,
-    value: float,
-    sender: str,
-    receiver: str,
+    source_chain: Optional[str],
+    destination_chain: Optional[str],
+    value: Optional[float],
+    sender: Optional[str],
+    receiver: Optional[str],
     timestamp: datetime,
     status: TransactionStatus = TransactionStatus.PENDING,
     bridge_id: Optional[int] = None,
@@ -55,27 +40,40 @@ def score_and_persist_transaction(
     caller's session context exits successfully and commits.
     """
     scoring_transaction = SimpleNamespace(
-        value=float(value),
+        value=float(value) if value is not None else 0.0,
         sender=sender,
         receiver=receiver,
         timestamp=timestamp,
         tx_hash=tx_hash,
     )
     score_result = anomaly_model.score(scoring_transaction)
-    risk_score = float(score_result["risk_score"])
-    severity = severity_from_score(risk_score)
-    flagged = is_alerting_severity(severity)
+    model_unavailable = bool(
+        score_result.get("model_unavailable")
+        or score_result.get("risk_score") is None
+    )
+    if model_unavailable:
+        severity = "low"
+        flagged = False
+        risk_score = None
+    else:
+        risk_score = float(score_result["risk_score"])
+        severity = severity_from_score(risk_score)
+        flagged = is_alerting_severity(severity)
 
     transaction = session.query(Transaction).filter_by(tx_hash=tx_hash).first()
     if transaction is None:
-        if bridge_id is None:
-            bridge_id = _get_or_create_bridge(session, source_chain).id
+        if bridge_id is None and (sender or receiver):
+            known_addresses = [address for address in (sender, receiver) if address]
+            bridge = session.query(Bridge).filter(
+                Bridge.address.in_(known_addresses)
+            ).first()
+            bridge_id = bridge.id if bridge else None
         transaction = Transaction(
             tx_hash=tx_hash,
             bridge_id=bridge_id,
             source_chain=source_chain,
             destination_chain=destination_chain,
-            value=float(value),
+            value=value,
             sender=sender,
             receiver=receiver,
             timestamp=timestamp,
@@ -92,6 +90,25 @@ def score_and_persist_transaction(
     transaction.anomaly_score = risk_score
     transaction.is_flagged = flagged
 
+    if model_unavailable:
+        session.flush()
+        unavailable_reason = "model_unavailable"
+        if sender is None:
+            unavailable_reason += "; raw entry (volume unavailable)"
+        unavailable_score = dict(score_result)
+        unavailable_score.update({
+            "risk_score": None,
+            "severity": severity,
+            "reason": unavailable_reason,
+            "model_unavailable": True,
+        })
+        return {
+            "transaction": transaction,
+            "detection": None,
+            "alert": None,
+            "score": unavailable_score,
+        }
+
     feature_names = (
         anomaly_model.feature_extractor.get_feature_names()
         if getattr(anomaly_model, "feature_extractor", None)
@@ -102,6 +119,17 @@ def score_and_persist_transaction(
         name: float(feature_value)
         for name, feature_value in zip(feature_names, features)
     }
+    raw_entry = sender is None
+    features_used["volume_available"] = value is not None
+    features_used["sender_available"] = sender is not None
+    features_used["receiver_available"] = receiver is not None
+    features_used["chains_available"] = (
+        source_chain is not None and destination_chain is not None
+    )
+    reason = score_result.get("reason")
+    if raw_entry:
+        marker = "raw entry (volume unavailable)"
+        reason = f"{reason}; {marker}" if reason else marker
     detection = AnomalyDetection(
         transaction_id=transaction.id,
         anomaly_score=risk_score,
@@ -109,7 +137,7 @@ def score_and_persist_transaction(
         features_used=features_used,
         model_version=str(score_result.get("model_version", "unknown")),
         severity=_severity_enum(severity),
-        reason=score_result.get("reason"),
+        reason=reason,
     )
     session.add(detection)
 
@@ -131,7 +159,7 @@ def score_and_persist_transaction(
     canonical_score.update({
         "risk_score": risk_score,
         "severity": severity,
-        "reason": score_result.get("reason"),
+        "reason": reason,
     })
     return {
         "transaction": transaction,

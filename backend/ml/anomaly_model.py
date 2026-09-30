@@ -303,8 +303,9 @@ class AnomalyModel:
     def _fallback_score(self, transaction) -> Dict[str, Any]:
         """
         Fallback scoring when model not available.
-        
-        Uses simple heuristic based on transaction value.
+
+        The caller persists the transaction with a NULL score and does not
+        create anomaly or alert rows until a trained model is available.
         
         Args:
             transaction: Transaction model instance
@@ -313,42 +314,28 @@ class AnomalyModel:
             Scoring dictionary with conservative defaults
         """
         try:
-            value = float(getattr(transaction, 'value', 0))
-            
-            # Simple heuristic: large transactions are higher risk
-            if value > 100000:
-                risk_score = 75
-                severity = "high"
-                reason = "Large transaction value (model unavailable, heuristic scoring)"
-            elif value > 50000:
-                risk_score = 50
-                severity = "medium"
-                reason = "Elevated transaction value (model unavailable, heuristic scoring)"
-            else:
-                risk_score = 25
-                severity = "low"
-                reason = "Normal value range (model unavailable, heuristic scoring)"
-            
             return {
-                "risk_score": risk_score,
-                "confidence": 30,  # Low confidence when using fallback
-                "severity": severity,
-                "reason": reason,
+                "risk_score": None,
+                "confidence": 0,
+                "severity": "low",
+                "reason": "model_unavailable",
                 "model_version": "fallback",
                 "prediction": "unknown",
                 "features": [],
+                "model_unavailable": True,
             }
             
         except Exception as e:
             logger.error(f"Fallback scoring failed: {e}")
             return {
-                "risk_score": 50,
+                "risk_score": None,
                 "confidence": 0,
-                "severity": "medium",
-                "reason": "Unable to analyze transaction - using default score",
+                "severity": "low",
+                "reason": "model_unavailable",
                 "model_version": "fallback",
                 "prediction": "unknown",
                 "features": [],
+                "model_unavailable": True,
             }
     
     def is_loaded(self) -> bool:

@@ -132,12 +132,12 @@ class Transaction(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     tx_hash = Column(String(255), unique=True, nullable=False, index=True)
-    bridge_id = Column(Integer, ForeignKey("bridges.id"), nullable=False, index=True)
-    source_chain = Column(String(50), nullable=False)
-    destination_chain = Column(String(50), nullable=False)
-    value = Column(Float, nullable=False)
-    sender = Column(String(255), nullable=False)
-    receiver = Column(String(255), nullable=False)
+    bridge_id = Column(Integer, ForeignKey("bridges.id"), nullable=True, index=True)
+    source_chain = Column(String(50), nullable=True)
+    destination_chain = Column(String(50), nullable=True)
+    value = Column(Float, nullable=True)
+    sender = Column(String(255), nullable=True)
+    receiver = Column(String(255), nullable=True)
     timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     status = Column(Enum(TransactionStatus), default=TransactionStatus.PENDING, nullable=False)
     anomaly_score = Column(Float, default=0.0)
@@ -181,6 +181,7 @@ class Transaction(Base):
             "value": self.value,
             "sender": self.sender,
             "receiver": self.receiver,
+            "raw_entry": self.sender is None,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
             "status": self.status.value if self.status else None,
             "anomaly_score": self.anomaly_score,

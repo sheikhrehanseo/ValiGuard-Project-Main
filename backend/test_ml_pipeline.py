@@ -189,8 +189,8 @@ class TestAnomalyModelScoring:
         assert "reason" in result
         assert "model_version" in result
     
-    def test_risk_score_bounds_0_to_100(self):
-        """Test that risk_score is always clamped to 0-100."""
+    def test_model_unavailable_has_no_score(self):
+        """Unavailable models do not fabricate a risk score from value."""
         from ml.anomaly_model import AnomalyModel
         
         model = AnomalyModel(model_dir="nonexistent/path")
@@ -212,8 +212,8 @@ class TestAnomalyModelScoring:
             )
             result = model.score(tx)
             
-            assert 0 <= result["risk_score"] <= 100, \
-                f"risk_score out of bounds for {desc} value {value}: {result['risk_score']}"
+            assert result["risk_score"] is None, desc
+            assert result["model_unavailable"] is True
     
     def test_confidence_bounds(self):
         """Test that confidence is within 0-100."""
@@ -375,8 +375,8 @@ class TestNoModelHandling:
         
         assert model.model_version in ["fallback", "untrained"]
     
-    def test_fallback_large_value_higher_severity(self):
-        """Test that fallback gives higher severity for large values."""
+    def test_fallback_does_not_use_value_heuristic(self):
+        """Unavailable models produce the same explicit neutral result."""
         from ml.anomaly_model import AnomalyModel
         
         model = AnomalyModel(model_dir="/nonexistent/path")
@@ -389,9 +389,10 @@ class TestNoModelHandling:
         tx_large = MockTransaction(value=500000.0, sender="0x2", timestamp=datetime.utcnow())
         result_large = model.score(tx_large)
         
-        # Large value should have higher or equal severity
-        severity_order = {"low": 0, "medium": 1, "high": 2, "critical": 3}
-        assert severity_order[result_large["severity"]] >= severity_order[result_small["severity"]]
+        assert result_small["risk_score"] is None
+        assert result_large["risk_score"] is None
+        assert result_small["reason"] == "model_unavailable"
+        assert result_large["reason"] == "model_unavailable"
     
     def test_is_loaded_returns_false_without_model(self):
         """Test that is_loaded() returns False when model not loaded."""
@@ -482,7 +483,8 @@ class TestMLPipelineIntegration:
         # Score with model
         result = model.score(tx)
         assert "risk_score" in result
-        assert 0 <= result["risk_score"] <= 100
+        assert result["risk_score"] is None
+        assert result["model_unavailable"] is True
     
     def test_multiple_transactions_consistency(self):
         """Test scoring multiple transactions produces consistent types."""
@@ -500,8 +502,8 @@ class TestMLPipelineIntegration:
             
             result = model.score(tx)
             
-            assert isinstance(result["risk_score"], int)
-            assert 0 <= result["risk_score"] <= 100
+            assert result["risk_score"] is None
+            assert result["model_unavailable"] is True
             assert result["severity"] in valid_severities
             assert isinstance(result["reason"], str)
 
