@@ -149,14 +149,15 @@ export default function Dashboard() {
                 if (histData.data.transactions.length > 0) {
                     const mappedTxs = histData.data.transactions.map(tx => {
                         const txHash = tx.tx_hash || tx.transaction_hash || '';
-                        const value = tx.value ?? tx.amount ?? 0;
+                        const value = tx.value ?? tx.amount;
                         return {
                         hash: txHash.substring(0, 10) + "...",
                         type: "BridgeValidation",
                         time: "Just now",
-                        from: tx.sender || "Network",
-                        amt: value + " Token",
-                        severity: tx.severity
+                        from: tx.sender ?? "—",
+                        amt: value == null ? "—" : value + " Token",
+                        severity: tx.severity,
+                        raw_entry: tx.raw_entry
                         };
                     });
                     setTransactions(mappedTxs);
@@ -225,8 +226,9 @@ export default function Dashboard() {
                 type: 'BridgeValidation',
                 time: 'Just now',
                 from: (tx.sender || 'network').substring(0, 10) + '...',
-                amt: `${tx.value ?? 0} QIE`,
+                amt: tx.value == null ? '—' : `${tx.value} QIE`,
                 severity: tx.severity,
+                raw_entry: tx.raw_entry,
             }, ...prev.slice(0, 9)]);
         });
 
@@ -574,6 +576,7 @@ export default function Dashboard() {
                                                     <th className="p-4">Age</th>
                                                     <th className="p-4">From</th>
                                                     <th className="p-4">Amount</th>
+                                                    <th className="p-4">Entry</th>
                                                     <th className="p-4">Risk</th>
                                                 </tr>
                                             </thead>
@@ -585,6 +588,11 @@ export default function Dashboard() {
                                                         <td className="p-4 text-slate-400">{tx.time}</td>
                                                         <td className="p-4 font-mono text-slate-400">{tx.from}</td>
                                                         <td className="p-4 font-medium">{tx.amt}</td>
+                                                        <td className="p-4">
+                                                            {tx.raw_entry ? (
+                                                                <span className="px-2 py-1 rounded bg-slate-700 text-slate-300 text-xs font-semibold">RAW</span>
+                                                            ) : <span className="text-slate-500">-</span>}
+                                                        </td>
                                                         <td className="p-4">
                                                             {tx.severity ? (
                                                                 <span className={`px-2 py-1 rounded text-xs font-semibold ${SEVERITY_STYLES[tx.severity]?.bg || 'bg-slate-700'} ${SEVERITY_STYLES[tx.severity]?.text || 'text-slate-300'}`}>

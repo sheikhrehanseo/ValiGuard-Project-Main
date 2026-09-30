@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import logging
+import base64
+import hashlib
+import json
+import os
 import threading
 import time
-from datetime import datetime, timezone
-from types import SimpleNamespace
+from datetime import datetime
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+import requests
 from sqlalchemy.exc import IntegrityError
 
 from qie_node_manager import QIENodeManager
@@ -24,16 +28,7 @@ from core.scoring import score_and_persist_transaction
 
 # Phase 1 DB layer — reuse the same DatabaseManager / session pattern as app.py.
 from database.db import DatabaseManager, DatabaseConfig
-from database.models import (
-    Alert,
-    AlertType,
-    AnomalyDetection,
-    Bridge,
-    BridgeStatus,
-    SeverityLevel,
-    Transaction,
-    TransactionStatus,
-)
+from database.models import Transaction, TransactionStatus
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +57,7 @@ def _severity_enum(severity_str: str) -> SeverityLevel:
 # Normalization
 # ---------------------------------------------------------------------------
 
-def _coerce_float(value: Any, default: float = 0.0) -> float:
+def _coerce_float(value: Any, default: Optional[float] = None) -> Optional[float]:
     """Best-effort conversion of arbitrary RPC payload values to float."""
     if value is None:
         return default
@@ -76,6 +71,25 @@ def _iso_to_datetime(value: Optional[str]) -> Optional[datetime]:
     """Parse an ISO-8601 timestamp; return None on failure."""
     if not value:
         return None
+
+
+def raw_entry_bytes(entry: Any) -> bytes:
+    """Return the raw bytes represented by a Tendermint entry."""
+    if isinstance(entry, bytes):
+        return entry
+    if isinstance(entry, bytearray):
+        return bytes(entry)
+    if isinstance(entry, str):
+        try:
+            return base64.b64decode(entry, validate=True)
+        except Exception:
+            return entry.encode("utf-8")
+    return json.dumps(entry, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def deterministic_raw_hash(entry: Any) -> str:
+    """Hash decoded raw transaction bytes consistently across RPC surfaces."""
+    return hashlib.sha256(raw_entry_bytes(entry)).hexdigest()
     try:
         # Tendermint timestamps look like "2026-07-19T12:34:56.123456789Z"
         # Truncate nanoseconds to microseconds for fromisoformat compatibility.
@@ -91,79 +105,39 @@ def _iso_to_datetime(value: Optional[str]) -> Optional[datetime]:
 def normalize_transaction(
     raw_tx: Dict[str, Any],
     bridge_id: Optional[int] = None,
-    default_source_chain: str = "QIE",
-    default_destination_chain: str = "QIE",
 ) -> Dict[str, Any]:
     """
     Normalize a raw QIE/Tendermint transaction payload into the Transaction
     schema shape (matching backend/database/models.py Transaction.to_dict()).
 
-    Tendermint block txs are byte-encoded; in practice the QIE RPC layer (and
-    the mocked test fixtures) expose a JSON-ish structure. This function is
-    defensive: it pulls well-known fields when present and falls back to sane
-    defaults so the caller always gets a complete, schema-shaped dict.
+    Raw entries are intentionally not decoded. A raw entry is identified by
+    the private ``_raw_entry`` key and is persisted with sender=None; this is
+    the raw-entry convention used throughout the worker. Unknown fields remain
+    NULL. Timestamp, source, and block height metadata remain available when
+    the RPC supplied them.
 
     Args:
         raw_tx: Raw transaction dict from QIENodeManager (mempool or block).
         bridge_id: Bridge FK to assign (resolved upstream by the persistence
             layer in a later sub-step; None is acceptable for normalization-only).
-        default_source_chain: Fallback source chain when not derivable from tx.
-        default_destination_chain: Fallback destination chain.
-
     Returns:
         Dict matching Transaction.to_dict() field names:
             tx_hash, bridge_id, source_chain, destination_chain, value,
             sender, receiver, timestamp, status, anomaly_score, is_flagged,
             created_at, updated_at  (id omitted — assigned by the DB).
     """
-    # Tendermint txs in a block come wrapped under "tx_result" or as a raw
-    # hex string; the QIE app layer may also surface decoded fields. We handle
-    # the common shapes defensively.
     tx = raw_tx if isinstance(raw_tx, dict) else {}
+    raw_entry = tx.get("_raw_entry")
+    is_raw = raw_entry is not None
 
-    # tx_hash: prefer explicit hash fields, else fall back to a provided id.
-    tx_hash = (
-        tx.get("hash")
-        or tx.get("tx_hash")
-        or tx.get("txHash")
-        or (tx.get("tx_result", {}) or {}).get("hash")
-        or ""
+    tx_hash = deterministic_raw_hash(raw_entry) if is_raw else str(
+        tx.get("hash") or tx.get("tx_hash") or tx.get("txHash") or ""
     )
-    # Some Tendermint responses encode the hash as bytes/hex; normalize to str.
-    if isinstance(tx_hash, (bytes, bytearray)):
-        tx_hash = tx_hash.hex()
-    tx_hash = str(tx_hash) if tx_hash else ""
-
-    # Sender / receiver / value: try a few common key spellings used by the
-    # QIE/Cosmos SDK message layer and the mocked fixtures.
-    sender = (
-        tx.get("sender")
-        or tx.get("from")
-        or tx.get("from_address")
-        or (tx.get("tx_result", {}) or {}).get("sender")
-        or ""
-    )
-    receiver = (
-        tx.get("receiver")
-        or tx.get("to")
-        or tx.get("to_address")
-        or (tx.get("tx_result", {}) or {}).get("receiver")
-        or ""
-    )
-    value = _coerce_float(
-        tx.get("value")
-        or tx.get("amount")
-        or (tx.get("tx_result", {}) or {}).get("value")
-        or 0.0
-    )
-
-    # Chains: derive if the payload carries them, else use defaults.
-    source_chain = tx.get("source_chain") or tx.get("sourceChain") or default_source_chain
-    destination_chain = (
-        tx.get("destination_chain")
-        or tx.get("destinationChain")
-        or default_destination_chain
-    )
+    sender = None if is_raw else tx.get("sender") or tx.get("from") or tx.get("from_address")
+    receiver = None if is_raw else tx.get("receiver") or tx.get("to") or tx.get("to_address")
+    value = None if is_raw else _coerce_float(tx.get("value") or tx.get("amount"))
+    source_chain = None if is_raw else tx.get("source_chain") or tx.get("sourceChain")
+    destination_chain = None if is_raw else tx.get("destination_chain") or tx.get("destinationChain")
 
     # Timestamp: block header time for confirmed txs, else "now".
     raw_ts = (
@@ -192,7 +166,7 @@ def normalize_transaction(
         "receiver": receiver,
         "timestamp": timestamp,
         "status": status,
-        "anomaly_score": 0.0,   # populated by the ML scoring pipeline (Task 5.2)
+        "anomaly_score": None,  # populated by the ML scoring pipeline
         "is_flagged": False,     # set by the scoring/alerting layer
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
@@ -219,10 +193,9 @@ class IngestionWorker:
         node_manager: Optional[QIENodeManager] = None,
         db_manager: Optional[DatabaseManager] = None,
         anomaly_model: Optional[AnomalyModel] = None,
-        poll_interval: float = 5.0,
-        max_backoff: float = 60.0,
+        poll_interval: float = 2.5,
+        max_backoff: float = 10.0,
         bridge_id: Optional[int] = None,
-        default_bridge_chain: str = "QIE",
         on_new_transaction: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
         """
@@ -236,10 +209,7 @@ class IngestionWorker:
                 singleton from ml.anomaly_model.get_model() is used.
             poll_interval: Seconds between successful poll iterations.
             max_backoff: Cap for exponential backoff when RPC calls fail.
-            bridge_id: Bridge FK to stamp onto normalized transactions. If
-                None, a default bridge is get_or_create'd per source chain
-                (same helper pattern as app.py).
-            default_bridge_chain: Chain name used when creating a default bridge.
+            bridge_id: Optional known bridge FK for explicitly identified data.
             on_new_transaction: Optional callback invoked once per newly
                 normalized+scored+persisted transaction with the final dict
                 (including anomaly_score / is_flagged). Used by callers/tests
@@ -259,8 +229,10 @@ class IngestionWorker:
 
         self.poll_interval = poll_interval
         self.max_backoff = max_backoff
+        self.mempool_enabled = os.getenv("MEMPOOL_ENABLED", "1").lower() not in {
+            "0", "false", "no"
+        }
         self.bridge_id = bridge_id
-        self.default_bridge_chain = default_bridge_chain
         self.on_new_transaction = on_new_transaction
 
         # In-memory de-duplication of tx_hash across iterations. The DB unique
@@ -336,10 +308,11 @@ class IngestionWorker:
         new_normalized: List[Dict[str, Any]] = []
 
         # 1) Mempool (unconfirmed txs).
-        for raw in self._fetch_mempool_txs():
-            normalized = self._handle_raw(raw)
-            if normalized is not None:
-                new_normalized.append(normalized)
+        if self.mempool_enabled:
+            for raw in self._fetch_mempool_txs():
+                normalized = self._handle_raw(raw)
+                if normalized is not None:
+                    new_normalized.append(normalized)
 
         # 2) Latest block (confirmed txs).
         for raw in self._fetch_latest_block_txs():
@@ -365,8 +338,16 @@ class IngestionWorker:
 
         normalized = normalize_transaction(raw_tx, bridge_id=self.bridge_id)
         tx_hash = normalized.get("tx_hash") or ""
-        if not tx_hash or tx_hash in self._seen_hashes:
+        if not tx_hash:
             return None
+        is_confirmed = normalized.get("status") == "confirmed"
+        if tx_hash in self._seen_hashes and not is_confirmed:
+            return None
+        if is_confirmed:
+            with self.db_manager.get_session() as session:
+                existing = session.query(Transaction).filter_by(tx_hash=tx_hash).first()
+                if existing is not None and existing.status == TransactionStatus.CONFIRMED:
+                    return None
         # Optimistically mark seen so a later per-tx failure doesn't cause us
         # to retry the same hash every loop. If persistence fails with a
         # duplicate IntegrityError we keep it marked seen (correct behavior).
@@ -406,16 +387,6 @@ class IngestionWorker:
         """
         try:
             with self.db_manager.get_session() as session:
-                # Resolve bridge FK if not pinned. Same helper pattern as app.py.
-                bridge_id = normalized.get("bridge_id")
-                if bridge_id is None:
-                    bridge = self._get_or_create_bridge(
-                        session,
-                        address=None,
-                        chain_name=normalized.get("source_chain") or self.default_bridge_chain,
-                    )
-                    bridge_id = bridge.id
-
                 # Map status string -> TransactionStatus enum.
                 status_str = normalized.get("status") or "pending"
                 status_enum = (
@@ -428,14 +399,14 @@ class IngestionWorker:
                     session=session,
                     anomaly_model=self.anomaly_model,
                     tx_hash=normalized["tx_hash"],
-                    source_chain=normalized.get("source_chain", "QIE"),
-                    destination_chain=normalized.get("destination_chain", "QIE"),
-                    value=normalized.get("value", 0.0),
-                    sender=normalized.get("sender", ""),
-                    receiver=normalized.get("receiver", ""),
+                    source_chain=normalized.get("source_chain"),
+                    destination_chain=normalized.get("destination_chain"),
+                    value=normalized.get("value"),
+                    sender=normalized.get("sender"),
+                    receiver=normalized.get("receiver"),
                     timestamp=normalized.get("timestamp") or datetime.utcnow(),
                     status=status_enum,
-                    bridge_id=bridge_id,
+                    bridge_id=normalized.get("bridge_id"),
                 )
 
             return result
@@ -446,54 +417,38 @@ class IngestionWorker:
             logger.warning("Duplicate tx_hash skipped: %s (%s)", normalized.get("tx_hash"), exc.orig)
             return None
 
-    def _get_or_create_bridge(self, session, address: Optional[str], chain_name: str) -> Bridge:
-        """
-        Get an existing Bridge by address or create a default one.
-
-        Mirrors app.py's get_or_create_bridge helper exactly so the worker
-        shares the same default-bridge convention. We don't import the helper
-        from app.py to avoid starting Flask as a side effect.
-        """
-        bridge_address = address or f"bridge:{chain_name.lower()}:default"
-        bridge = session.query(Bridge).filter_by(address=bridge_address).first()
-        if bridge is None:
-            bridge = Bridge(
-                address=bridge_address,
-                chain_name=chain_name,
-                status=BridgeStatus.ACTIVE,
-            )
-            session.add(bridge)
-            session.flush()  # populate bridge.id without full commit
-        return bridge
+    def _fast_rpc_call(self, method: str) -> Dict[str, Any]:
+        """Make a one-shot worker RPC call; polling supplies the retry loop."""
+        response = requests.post(
+            self.node_manager.rpc_url,
+            json={"jsonrpc": "2.0", "id": 1, "method": method, "params": {}},
+            timeout=3,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("error"):
+            raise RuntimeError(str(payload["error"]))
+        return payload.get("result", {}) or {}
 
     def _fetch_mempool_txs(self) -> Iterable[Dict[str, Any]]:
         """
         Fetch unconfirmed transactions from the mempool via QIENodeManager.
 
-        Reuses the manager's `_rpc_call` (the same private helper its public
-        methods use) so we do NOT duplicate any HTTP/session/retry logic. If the
-        manager ever grows a public `get_mempool()` method, swap this in.
+        Uses a one-shot 3-second RPC request. The worker loop handles retry and
+        backoff so a dead node cannot inherit the manager's setup retry policy.
         """
-        result = self.node_manager._rpc_call("unconfirmed_txs")
+        try:
+            result = self._fast_rpc_call("unconfirmed_txs")
+        except Exception as exc:
+            logger.warning("Mempool RPC unavailable: %s", exc)
+            return []
         if not result:
             return []
         # Tendermint shape: {"n_txs": "1", "txs": ["<base64>", ...]}
         txs = result.get("txs") or []
         out: List[Dict[str, Any]] = []
-        for idx, entry in enumerate(txs):
-            # Entries are usually base64-encoded byte strings; surface them as
-            # dicts with a synthetic hash so normalization has something to
-            # de-duplicate on. Real decoding happens in the persistence sub-step.
-            if isinstance(entry, dict):
-                entry = dict(entry)
-                entry.setdefault("_source", "mempool")
-                out.append(entry)
-            else:
-                out.append({
-                    "_source": "mempool",
-                    "hash": str(entry) or f"mempool-{idx}",
-                    "raw": entry,
-                })
+        for entry in txs:
+            out.append({"_source": "mempool", "_raw_entry": entry})
         return out
 
     def _fetch_latest_block_txs(self) -> Iterable[Dict[str, Any]]:
@@ -501,11 +456,14 @@ class IngestionWorker:
         Fetch transactions from the latest block via QIENodeManager's public
         `get_latest_block()` method (reused — no duplicated RPC logic).
         """
-        block_result = self.node_manager.get_latest_block()
-        if not block_result.get("found"):
+        try:
+            block = self._fast_rpc_call("block")
+        except Exception as exc:
+            logger.warning("Block RPC unavailable: %s", exc)
             return []
-        block_data = block_result.get("data", {}) or {}
-        block = block_data.get("block", {}) or {}
+        block = block.get("block", {}) or {}
+        if not block:
+            return []
         data = block.get("data", {}) or {}
         txs = data.get("txs") or []
         header = block.get("header", {}) or {}
@@ -513,16 +471,13 @@ class IngestionWorker:
         block_time = header.get("time")
 
         out: List[Dict[str, Any]] = []
-        for idx, entry in enumerate(txs):
-            if isinstance(entry, dict):
-                entry = dict(entry)
-            else:
-                entry = {"raw": entry}
-            entry.setdefault("_source", "block")
-            entry.setdefault("height", height)
-            entry.setdefault("timestamp", block_time)
-            entry.setdefault("hash", entry.get("hash") or f"block-{height}-{idx}")
-            out.append(entry)
+        for entry in txs:
+            out.append({
+                "_source": "block",
+                "_raw_entry": entry,
+                "height": height,
+                "timestamp": block_time,
+            })
         return out
 
 

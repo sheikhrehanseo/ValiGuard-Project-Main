@@ -101,16 +101,21 @@ def _emit_transaction_events(tx: Dict[str, Any]) -> None:
     from core.severity import severity_from_score
 
     timestamp = tx.get("timestamp")
+    anomaly_score = tx.get("anomaly_score")
+    severity = tx.get("severity")
+    if severity is None:
+        severity = severity_from_score(anomaly_score) if anomaly_score is not None else "low"
     payload = {
         "tx_hash": tx.get("tx_hash"),
         "value": tx.get("value"),
         "sender": tx.get("sender"),
         "receiver": tx.get("receiver"),
         "status": tx.get("status"),
-        "anomaly_score": tx.get("anomaly_score"),
-        "risk_score": tx.get("risk_score", tx.get("anomaly_score")),
+        "anomaly_score": anomaly_score,
+        "risk_score": tx.get("risk_score", anomaly_score),
         "is_flagged": tx.get("is_flagged"),
-        "severity": severity_from_score(tx.get("anomaly_score", 0)),
+        "raw_entry": tx.get("raw_entry", tx.get("sender") is None),
+        "severity": severity,
         "reason": tx.get("reason"),
         "source_chain": tx.get("source_chain"),
         "destination_chain": tx.get("destination_chain"),
@@ -672,7 +677,7 @@ def get_anomaly_score():
         
         data = {
             "transaction_hash": tx_data.get("transaction_hash"),
-            "anomaly_score": round(anomaly_score_100, 2),
+            "anomaly_score": round(anomaly_score_100, 2) if anomaly_score_100 is not None else None,
             "severity": severity,
             "model_confidence": confidence,
             "reason": reason,

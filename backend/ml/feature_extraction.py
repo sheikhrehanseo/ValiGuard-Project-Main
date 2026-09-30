@@ -120,6 +120,9 @@ class FeatureExtractor:
         Returns:
             Normalized value in [0, ~1] range
         """
+        # Unknown raw-entry volume is neutral for feature input only.
+        if transaction.value is None:
+            return 0.0
         value = float(transaction.value)
         
         if len(self._value_history) < 10:
@@ -215,7 +218,7 @@ class FeatureExtractor:
         """Update rolling history with new transaction."""
         timestamp = transaction.timestamp or datetime.utcnow()
         sender = transaction.sender
-        value = float(transaction.value)
+        value = float(transaction.value) if transaction.value is not None else 0.0
         
         self._history.append((timestamp, sender, value))
         self._value_history.append(value)
