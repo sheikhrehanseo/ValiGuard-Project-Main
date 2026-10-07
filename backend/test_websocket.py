@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from database.db import DatabaseConfig, DatabaseManager
 from database.models import Alert, AnomalyDetection, Transaction
+from ingestion.worker import IngestionWorker
 from test_alert_thresholds import FixedScoreModel
 
 
@@ -72,8 +73,10 @@ def test_scored_transaction_and_alert_emit_after_commit(stage3_context):
 
     received = _events(socket_client)
     transaction_event = next(item for item in received if item["name"] == "new_transaction")
+    anomaly_event = next(item for item in received if item["name"] == "new_anomaly")
     alert_event = next(item for item in received if item["name"] == "new_alert")
     transaction_payload = transaction_event["args"][0]
+    anomaly_payload = anomaly_event["args"][0]
     alert_payload = alert_event["args"][0]
 
     with database.get_session() as session:
@@ -93,6 +96,9 @@ def test_scored_transaction_and_alert_emit_after_commit(stage3_context):
     assert transaction_payload["anomaly_score"] == 45.0
     assert transaction_payload["severity"] == "medium"
     assert transaction_payload["reason"] == "fixed test score 45.0"
+    assert anomaly_payload["tx_hash"] == "stage3-medium"
+    assert anomaly_payload["severity"] == "medium"
+    assert anomaly_payload["anomaly_score"] == 45.0
     assert alert_payload["tx_hash"] == "stage3-medium"
     assert alert_payload["severity"] == "medium"
     assert alert_payload["reason"] == "fixed test score 45.0"
@@ -116,7 +122,58 @@ def test_low_score_emits_transaction_without_alert(stage3_context):
     received = _events(socket_client)
     names = [item["name"] for item in received]
     assert "new_transaction" in names
+    assert "new_anomaly" in names
     assert "new_alert" not in names
+
+
+def test_mock_traffic_uses_worker_event_path(stage3_context, monkeypatch):
+    app_module, database, model = stage3_context
+    model.score_value = 45.0
+    monkeypatch.setattr(
+        app_module,
+        "ingestion_worker",
+        IngestionWorker(
+            db_manager=database,
+            anomaly_model=model,
+            on_new_transaction=app_module._emit_transaction_events,
+        ),
+    )
+    flask_client = app_module.app.test_client()
+    socket_client = app_module.socketio.test_client(
+        app_module.app, flask_test_client=flask_client
+    )
+    _events(socket_client)
+
+    response = flask_client.post(
+        "/api/v1/bridge/anomaly-score",
+        json={
+            "transaction_hash": "stage3-worker-route",
+            "amount": 250.0,
+            "sender": "qie1worker",
+            "receiver": "qie1receiver",
+        },
+    )
+    assert response.status_code == 200
+    names = [item["name"] for item in _events(socket_client)]
+    assert names == ["new_transaction", "new_anomaly", "new_alert"]
+    with database.get_session() as session:
+        assert session.query(Transaction).filter_by(
+            tx_hash="stage3-worker-route"
+        ).one()
+        assert session.query(AnomalyDetection).count() == 1
+        assert session.query(Alert).count() == 1
+
+
+def test_connected_client_receives_node_status(stage3_context):
+    app_module, _database, _model = stage3_context
+    socket_client = app_module.socketio.test_client(app_module.app)
+    assert socket_client.is_connected()
+    _events(socket_client)
+
+    app_module.socket_manager.emit_node_status({"healthy": True, "height": 123})
+
+    event = next(item for item in _events(socket_client) if item["name"] == "node_status")
+    assert event["args"][0] == {"healthy": True, "height": 123}
 
 
 def test_validate_cross_chain_uses_canonical_persistence(stage3_context):

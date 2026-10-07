@@ -172,6 +172,24 @@ class AnomalyModel:
             # decision_function typically ranges from ~-0.5 to ~0.5
             # Lower scores = more anomalous
             risk_score = self._convert_to_risk_score(decision_score)
+            # Keep the explicit value outlier signal monotonic with the
+            # Isolation Forest output. A capped value feature represents a
+            # transaction beyond the learned high-value baseline and must not
+            # score below an ordinary transaction because of temporal noise.
+            historical_values = list(
+                getattr(self.feature_extractor, "_value_history", ())
+            )[:-1]
+            historical_max = max(historical_values, default=0.0)
+            is_value_outlier = (
+                features[0] >= 2.0
+                or (
+                    historical_max > 0
+                    and transaction.value is not None
+                    and float(transaction.value) >= historical_max * 10
+                )
+            )
+            if is_value_outlier:
+                risk_score = max(risk_score, 80)
             
             # Determine confidence based on distance from threshold
             confidence = self._calculate_confidence(decision_score)
