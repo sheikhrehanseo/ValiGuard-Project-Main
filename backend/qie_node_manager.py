@@ -117,7 +117,7 @@ class QIENodeManager:
                 if "error" in data and data["error"]:
                     logger.error(f"RPC error for {method}: {data['error']}")
                     return {}
-                
+
                 return data.get("result", {})
                 
             except Exception as inner_e:
@@ -128,6 +128,15 @@ class QIENodeManager:
         except Exception as e:
             logger.error(f"Unexpected RPC error: {e}")
             return {}
+
+    def rpc_call(
+        self,
+        method: str,
+        params: Optional[Dict] = None,
+        timeout: int = 3,
+    ) -> Dict[str, Any]:
+        """Expose a bounded RPC call for ingestion and other runtime services."""
+        return self._rpc_call(method, params=params, timeout=timeout)
     
     def start_qie_node(self) -> Dict[str, Any]:
         """
