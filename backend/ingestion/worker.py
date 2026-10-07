@@ -71,6 +71,16 @@ def _iso_to_datetime(value: Optional[str]) -> Optional[datetime]:
     """Parse an ISO-8601 timestamp; return None on failure."""
     if not value:
         return None
+    try:
+        # Tendermint timestamps look like "2026-07-19T12:34:56.123456789Z"
+        # Truncate nanoseconds to microseconds for fromisoformat compatibility.
+        ts = value.rstrip("Z")
+        if "." in ts:
+            head, frac = ts.split(".", 1)
+            ts = f"{head}.{frac[:6]}"
+        return datetime.fromisoformat(ts)
+    except (ValueError, TypeError):
+        return None
 
 
 def raw_entry_bytes(entry: Any) -> bytes:
@@ -90,16 +100,6 @@ def raw_entry_bytes(entry: Any) -> bytes:
 def deterministic_raw_hash(entry: Any) -> str:
     """Hash decoded raw transaction bytes consistently across RPC surfaces."""
     return hashlib.sha256(raw_entry_bytes(entry)).hexdigest()
-    try:
-        # Tendermint timestamps look like "2026-07-19T12:34:56.123456789Z"
-        # Truncate nanoseconds to microseconds for fromisoformat compatibility.
-        ts = value.rstrip("Z")
-        if "." in ts:
-            head, frac = ts.split(".", 1)
-            ts = f"{head}.{frac[:6]}"
-        return datetime.fromisoformat(ts)
-    except (ValueError, TypeError):
-        return None
 
 
 def normalize_transaction(
@@ -425,16 +425,7 @@ class IngestionWorker:
 
     def _fast_rpc_call(self, method: str) -> Dict[str, Any]:
         """Make a one-shot worker RPC call; polling supplies the retry loop."""
-        response = requests.post(
-            self.node_manager.rpc_url,
-            json={"jsonrpc": "2.0", "id": 1, "method": method, "params": {}},
-            timeout=3,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        if payload.get("error"):
-            raise RuntimeError(str(payload["error"]))
-        return payload.get("result", {}) or {}
+        return self.node_manager.rpc_call(method, timeout=3)
 
     def _fetch_mempool_txs(self) -> Iterable[Dict[str, Any]]:
         """

@@ -58,6 +58,20 @@ const SEVERITY_STYLES = {
     low: { bg: 'bg-blue-500/10', border: 'border-blue-500/50', text: 'text-blue-400', icon: CheckCircle, label: 'Low' },
 };
 
+function formatTimeAgo(timestamp) {
+    if (!timestamp) return 'Unknown time';
+    const parsed = new Date(timestamp);
+    if (Number.isNaN(parsed.getTime())) return 'Unknown time';
+
+    const seconds = Math.max(0, Math.floor((Date.now() - parsed.getTime()) / 1000));
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    return `${Math.floor(hours / 24)}d ago`;
+}
+
 export default function Dashboard() {
     const [activeSection, setActiveSection] = useState('dashboard');
     const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -84,31 +98,30 @@ export default function Dashboard() {
 
     // Validator State
     const [stats, setStats] = useState({
-        activeBridges: 12,
+        activeBridges: null,
         anomalies24h: 0,
-        validationRate: 99.9,
-        modelAccuracy: 98.5
+        validationRate: null,
+        modelAccuracy: null
     });
 
     const [nodeStatus, setNodeStatus] = useState({
-        synced: true,
-        height: 1245032,
-        moniker: 'ValiGuard AI Validator',
-        network: 'qie-testnet-3'
+        synced: false,
+        height: null,
+        moniker: null,
+        network: null
     });
 
     // Live WebSocket state (REAL data source)
     const [liveAlerts, setLiveAlerts] = useState([]);
     const [socketStatus, setSocketStatus] = useState('disconnected');
 
-    const [transactions, setTransactions] = useState([
-        { hash: "0x7a8b...9c2d", type: "MsgSend", time: "2s ago", from: "qie1...9k2l", amt: "1,500 QIE" },
-        { hash: "0x7a8b...9c2d", type: "MsgSend", time: "2s ago", from: "qie1...9k2l", amt: "1,500 QIE" },
-        { hash: "0xe3f1...5a8b", type: "MsgDelegate", time: "12s ago", from: "qie1...p4m9", amt: "50,000 QIE" },
-        { hash: "0x9c2d...1e4f", type: "MsgVote", time: "45s ago", from: "qie1...x8r2", amt: "-" },
-        { hash: "0x4f1a...3b9d", type: "MsgSend", time: "1m ago", from: "qie1...v3n7", amt: "250 QIE" },
-        { hash: "0x1e2f...8c4a", type: "MsgWithdraw", time: "2m ago", from: "qie1...k9l2", amt: "12.5 QIE" },
-    ]);
+    const [transactions, setTransactions] = useState([]);
+    const [, setAgeTick] = useState(Date.now());
+
+    useEffect(() => {
+        const interval = setInterval(() => setAgeTick(Date.now()), 1000);
+        return () => clearInterval(interval);
+    }, []);
 
     // Wallet Connected Callback
     const handleWalletConnect = (address) => {
@@ -144,6 +157,15 @@ export default function Dashboard() {
                 }));
             }
 
+            const modelRes = await authedFetch('/api/v1/analytics/model-accuracy');
+            const modelData = await modelRes.json();
+            if (modelData.success) {
+                setStats(prev => ({
+                    ...prev,
+                    modelAccuracy: modelData.data.accuracy ?? null,
+                }));
+            }
+
             // Fetch History (Transactions)
             const histRes = await authedFetch('/api/v1/bridge/history?limit=10');
             const histData = await histRes.json();
@@ -155,7 +177,7 @@ export default function Dashboard() {
                         return {
                         hash: txHash.substring(0, 10) + "...",
                         type: "BridgeValidation",
-                        time: "Just now",
+                        timestamp: tx.timestamp || tx.created_at,
                         from: tx.sender ?? "—",
                         amt: value == null ? "—" : value + " Token",
                         severity: tx.severity,
@@ -181,6 +203,20 @@ export default function Dashboard() {
         if (dataSource === 'MOCK') {
             // Reset to Mock Data if switching back
             setBackendStatus('unknown');
+            setTransactions([]);
+            setLiveAlerts([]);
+            setNodeStatus({
+                synced: true,
+                height: 1245032,
+                moniker: 'ValiGuard AI Validator (simulation)',
+                network: 'simulation'
+            });
+            setStats({
+                activeBridges: null,
+                anomalies24h: 0,
+                validationRate: null,
+                modelAccuracy: null
+            });
             // --- MOCK LOGIC ---
             interval = setInterval(() => {
                 setNodeStatus(prev => ({ ...prev, height: prev.height + 1 }));
@@ -189,7 +225,7 @@ export default function Dashboard() {
                 const newTx = {
                     hash: "0x" + Math.random().toString(16).substr(2, 8) + "..." + Math.random().toString(16).substr(2, 4),
                     type: ["MsgSend", "MsgDelegate", "MsgVote", "MsgWithdraw"][Math.floor(Math.random() * 4)],
-                    time: "Just now",
+                    timestamp: new Date().toISOString(),
                     from: "qie1..." + Math.random().toString(36).substr(2, 4),
                     amt: (Math.random() * 1000).toFixed(2) + " QIE"
                 };
@@ -203,6 +239,15 @@ export default function Dashboard() {
             }, 3000);
         } else {
             // --- REAL LOGIC ---
+            setTransactions([]);
+            setLiveAlerts([]);
+            setNodeStatus({ synced: false, height: null, moniker: null, network: null });
+            setStats({
+                activeBridges: null,
+                anomalies24h: 0,
+                validationRate: null,
+                modelAccuracy: null
+            });
             fetchRealData(); // Initial fetch
             interval = setInterval(fetchRealData, 5000); // Poll every 5s
         }
@@ -226,7 +271,7 @@ export default function Dashboard() {
             setTransactions(prev => [{
                 hash: (tx.tx_hash || '').substring(0, 10) + '...',
                 type: 'BridgeValidation',
-                time: 'Just now',
+                timestamp: tx.timestamp || tx.created_at,
                 from: (tx.sender || 'network').substring(0, 10) + '...',
                 amt: tx.value == null ? '—' : `${tx.value} QIE`,
                 severity: tx.severity,
@@ -245,7 +290,10 @@ export default function Dashboard() {
         });
 
         socket.on('new_alert', (alert) => {
-            setLiveAlerts(prev => [alert, ...prev].slice(0, 20));
+            setLiveAlerts(prev => [{
+                ...alert,
+                timestamp: alert.timestamp || alert.created_at,
+            }, ...prev].slice(0, 20));
         });
 
         socket.on('alert_resolved', (resolved) => {
@@ -346,7 +394,9 @@ export default function Dashboard() {
                     <div className="space-y-1">
                         <div className="flex justify-between text-xs">
                             <span className="text-slate-500">Height</span>
-                            <span className="text-green-400 font-mono">#{nodeStatus.height.toLocaleString()}</span>
+                            <span className="text-green-400 font-mono">
+                                {nodeStatus.height == null ? '—' : `#${nodeStatus.height.toLocaleString()}`}
+                            </span>
                         </div>
                         <div className="flex justify-between text-xs">
                             <span className="text-slate-500">Status</span>
@@ -427,6 +477,11 @@ export default function Dashboard() {
                                 REAL
                             </button>
                         </div>
+                        <div className={`hidden lg:block text-xs font-semibold ${dataSource === 'REAL' ? 'text-green-400' : 'text-blue-400'}`}>
+                            {dataSource === 'REAL'
+                                ? 'REAL MODE = Live backend/QIE pipeline'
+                                : 'MOCK MODE = Simulation only'}
+                        </div>
 
                         {/* Wallet Connect Button */}
                         <WalletConnect onConnect={handleWalletConnect} />
@@ -482,10 +537,10 @@ export default function Dashboard() {
                                 >
                                     {/* Metrics Grid */}
                                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                                        <MetricCard label="Active Bridges" value={stats.activeBridges} icon={Boxes} color="blue" />
-                                        <MetricCard label="Anomalies (24h)" value={stats.anomalies24h} icon={AlertTriangle} color="red" />
-                                        <MetricCard label="Validation Rate" value={stats.validationRate + '%'} icon={CheckCircle} color="green" />
-                                        <MetricCard label="Model Prediction" value={stats.modelAccuracy + '%'} icon={TrendingUp} color="purple" />
+                                        <MetricCard label="Active Bridges" value={stats.activeBridges ?? '—'} icon={Boxes} color="blue" />
+                                        <MetricCard label="Anomalies (24h)" value={stats.anomalies24h ?? '—'} icon={AlertTriangle} color="red" />
+                                        <MetricCard label="Validation Rate" value={stats.validationRate == null ? '—' : `${stats.validationRate}%`} icon={CheckCircle} color="green" />
+                                        <MetricCard label="Model Prediction" value={stats.modelAccuracy == null ? '—' : `${stats.modelAccuracy}%`} icon={TrendingUp} color="purple" />
                                     </div>
 
                                     {/* Charts Area with Mock Visuals */}
@@ -596,7 +651,7 @@ export default function Dashboard() {
                                                     <tr key={i} className="hover:bg-slate-700/30 transition-colors">
                                                         <td className="p-4 font-mono text-blue-400">{tx.hash}</td>
                                                         <td className="p-4"><span className="px-2 py-1 rounded bg-slate-700 text-xs">{tx.type}</span></td>
-                                                        <td className="p-4 text-slate-400">{tx.time}</td>
+                                                        <td className="p-4 text-slate-400">{formatTimeAgo(tx.timestamp)}</td>
                                                         <td className="p-4 font-mono text-slate-400">{tx.from}</td>
                                                         <td className="p-4 font-medium">{tx.amt}</td>
                                                         <td className="p-4">
@@ -771,7 +826,7 @@ export default function Dashboard() {
                                                     </h4>
                                                     <p className="text-slate-300 text-sm mt-1">{alert.message}</p>
                                                     <div className="mt-2 text-xs text-slate-500 flex items-center gap-2">
-                                                        <span>{alert.time || 'Just now'}</span>
+                                                        <span>{formatTimeAgo(alert.timestamp)}</span>
                                                         <span>•</span>
                                                         <span className="font-mono">{(alert.tx_hash || '').substring(0, 12)}...</span>
                                                         <span>•</span>
