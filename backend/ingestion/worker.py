@@ -322,6 +322,12 @@ class IngestionWorker:
 
         return new_normalized
 
+    def process_raw_transaction(
+        self, raw_tx: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Process one externally supplied transaction through the worker path."""
+        return self._handle_raw({**raw_tx, "_source": raw_tx.get("_source", "mempool")})
+
     # -- internals ---------------------------------------------------------
 
     def _handle_raw(self, raw_tx: Dict[str, Any]) -> Optional[Dict[str, Any]]:

@@ -1,110 +1,204 @@
+"""Windows-friendly one-command ValiGuard launcher."""
 
-import subprocess
+from __future__ import annotations
+
+import argparse
+import atexit
 import os
+import signal
+import socket
+import subprocess
 import sys
-import threading
 import time
-import webbrowser
+from pathlib import Path
+from typing import Dict, List, Optional
 
-def start_backend():
-    print("[*] Starting Backend (Flask)...")
-    # Activate venv and run app.py
-    # Assuming venv is in current directory
-    if sys.platform == "win32":
-        python_exe = r"venv\Scripts\python.exe"
+import requests
+
+ROOT = Path(__file__).resolve().parent
+BACKEND_URL = "http://127.0.0.1:5000"
+FRONTEND_URL = "http://127.0.0.1:3001"
+
+
+def load_dotenv(path: Path = ROOT / ".env") -> None:
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"'))
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Start the ValiGuard local stack")
+    parser.add_argument("--demo", action="store_true", help="disable QIE ingestion")
+    parser.add_argument("--simulate", action="store_true", help="run HTTP traffic simulator")
+    parser.add_argument("--no-browser", action="store_true")
+    return parser
+
+
+def configure_environment(demo: bool, base: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    environment = dict(base or os.environ)
+    if demo:
+        environment["VALIGUARD_INGESTION_WORKER"] = "0"
+        environment["NEXT_PUBLIC_DEMO_MODE"] = "true"
     else:
-        python_exe = "venv/bin/python"
-    
-    if not os.path.exists(python_exe):
-        print(f"[!] Virtual environment not found at {python_exe}. Using system python.")
-        python_exe = sys.executable
+        environment.setdefault("VALIGUARD_INGESTION_WORKER", "1")
+        environment.setdefault("MEMPOOL_ENABLED", "1")
+        environment.setdefault("NEXT_PUBLIC_DEMO_MODE", "false")
+    return environment
 
-    cmd = [python_exe, "-m", "backend.app"]
+
+def port_in_use(port: int) -> bool:
+    with socket.socket() as sock:
+        sock.settimeout(0.2)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+def find_port_pid(port: int) -> Optional[str]:
+    """Best-effort PID lookup for whatever holds a port (Windows netstat)."""
+    if os.name != "nt":
+        return None
     try:
-        subprocess.run(cmd, check=True)
-    except KeyboardInterrupt:
-        pass
-    except Exception as e:
-        print(f"[x] Backend failed: {e}")
+        output = subprocess.run(
+            ["netstat", "-ano"], capture_output=True, text=True, check=False,
+        ).stdout
+    except OSError:
+        return None
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) >= 5 and parts[1].endswith(f":{port}") and parts[-2] == "LISTENING":
+            return parts[-1]
+    return None
 
-def start_frontend_server():
-    print("[*] Starting Frontend (Next.js)...")
-    # Run npm run dev in the frontend directory
-    # On Windows, need shell=True for npm, or use npm.cmd
-    npm_cmd = "npm.cmd" if sys.platform == "win32" else "npm"
-    cmd = [npm_cmd, "run", "dev"]
-    try:
-        subprocess.run(cmd, cwd="frontend", check=True)
-    except KeyboardInterrupt:
-        pass
-    except Exception as e:
-        print(f"[x] Frontend server failed: {e}")
-        print("Tip: Run 'npm install' in the frontend directory if you haven't yet.")
 
-def start_simulator():
-    print("[*] Starting Traffic Simulator (demo mode — no QIE node needed)...")
-    if sys.platform == "win32":
-        python_exe = r"venv\Scripts\python.exe"
+def check_ports_free() -> None:
+    """Fail fast with the port AND the likely owning PID on conflicts."""
+    for port, label in ((5000, "backend API (Flask)"), (3001, "frontend (Next.js)")):
+        if port_in_use(port):
+            pid = find_port_pid(port)
+            hint = f" (likely PID {pid})" if pid else ""
+            raise RuntimeError(
+                f"Port {port} is already in use by the {label}{hint}; "
+                f"stop that process first (taskkill /PID {pid} /T /F)"
+                if pid else
+                f"Port {port} is already in use by the {label}; "
+                "stop that process first"
+            )
+
+
+def wait_for_http(url: str, timeout: float, label: str) -> None:
+    deadline = time.monotonic() + timeout
+    last_error = "no response"
+    while time.monotonic() < deadline:
+        try:
+            response = requests.get(url, timeout=1)
+            if response.status_code < 500:
+                return
+            last_error = f"HTTP {response.status_code}"
+        except requests.RequestException as exc:
+            last_error = str(exc)
+        time.sleep(0.25)
+    raise RuntimeError(f"{label} did not become healthy at {url}: {last_error}")
+
+
+def terminate_process(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     else:
-        python_exe = "venv/bin/python"
-    if not os.path.exists(python_exe):
-        python_exe = sys.executable
+        process.terminate()
 
-    cmd = [python_exe, "scripts/generate_mock_traffic.py",
-           "--rate", "20", "--scenario", "mix"]
+
+def spawn(command: List[str], cwd: Path, env: Dict[str, str], label: str) -> subprocess.Popen:
+    creationflags = 0
+    if os.name == "nt":
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+    print(f"[*] Starting {label}...")
+    return subprocess.Popen(command, cwd=cwd, env=env, creationflags=creationflags)
+
+
+def run_migrations(env: Dict[str, str]) -> None:
+    python_exe = ROOT / "venv" / "Scripts" / "python.exe"
+    if not python_exe.exists():
+        python_exe = Path(sys.executable)
+    result = subprocess.run(
+        [str(python_exe), "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
+        cwd=ROOT / "backend",
+        env=env,
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError("Alembic migration failed")
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    load_dotenv()
+    env = configure_environment(args.demo)
+
+    check_ports_free()
+
+    run_migrations(env)
+    python_exe = ROOT / "venv" / "Scripts" / "python.exe"
+    if not python_exe.exists():
+        python_exe = Path(sys.executable)
+    npm = "npm.cmd" if os.name == "nt" else "npm"
+    processes: List[subprocess.Popen] = []
+
+    # Reap children even if main() exits through an unexpected path (not a
+    # hard SIGKILL — nothing can recover from that; see README).
+    atexit.register(cleanup_for_tests, processes)
+
     try:
-        subprocess.run(cmd, check=True)
-    except KeyboardInterrupt:
-        pass
-    except Exception as e:
-        print(f"[x] Simulator failed: {e}")
-
-def main():
-    print("==================================================")
-    print("ValiGuard AI - Local Launcher")
-    print("==================================================")
-    print("Starting services...")
-
-    run_simulator = "--simulate" in sys.argv
-    
-    # Check if Nginx is requested/available, otherwise use Python HTTP server for frontend
-    # User asked for Nginx config but running it on Windows requires Nginx executable.
-    # We provided config, but will run Python server for immediate 'localhost' access.
-    
-    t_backend = threading.Thread(target=start_backend)
-    t_backend.daemon = True
-    t_backend.start()
-    
-    time.sleep(2) # Wait for backend to init
-    
-    t_frontend = threading.Thread(target=start_frontend_server)
-    t_frontend.daemon = True
-    t_frontend.start()
-
-    if run_simulator:
-        time.sleep(4)  # let the API come up before sending traffic
-        t_sim = threading.Thread(target=start_simulator)
-        t_sim.daemon = True
-        t_sim.start()
-        print("[+] Traffic simulator running (mix scenarios).")
-    else:
-        print("[i] Tip: run 'python start_project.py --simulate' to feed demo traffic.")
-    
-    print("\n[+] Services started!")
-    print("   - Backend API: http://localhost:5000")
-    print("   - Frontend UI: http://localhost:3001 (Next.js)")
-    print("\n[!] NOTE: Nginx configs created in /nginx/ for deployment.")
-    print("   Running built-in servers for local testing now.")
-    print("==================================================")
-    
-    time.sleep(5) # Give Next.js more time to boot
-    webbrowser.open("http://localhost:3001")
-    
-    try:
+        processes.append(spawn([str(python_exe), "-m", "backend.app"], ROOT, env, "backend"))
+        wait_for_http(f"{BACKEND_URL}/health", 30, "backend")
+        processes.append(spawn([npm, "run", "dev"], ROOT / "frontend", env, "frontend"))
+        wait_for_http(FRONTEND_URL, 45, "frontend")
+        if args.simulate:
+            processes.append(spawn(
+                [str(python_exe), "scripts/generate_mock_traffic.py", "--api-url", BACKEND_URL],
+                ROOT,
+                env,
+                "traffic simulator",
+            ))
+        print("\nValiGuard is running")
+        print(f"  Dashboard: {FRONTEND_URL}")
+        print(f"  API:       {BACKEND_URL}")
+        print(f"  Health:    {BACKEND_URL}/health")
+        print(f"  Mode:      {'demo (no QIE node — node status shows offline honestly)' if args.demo else 'QIE (worker + mempool enabled)'}{' + traffic simulator' if args.simulate else ''}")
+        if not args.no_browser:
+            import webbrowser
+            webbrowser.open(FRONTEND_URL)
         while True:
             time.sleep(1)
+            if any(process.poll() is not None for process in processes):
+                raise RuntimeError("A child process exited unexpectedly")
     except KeyboardInterrupt:
-        print("\n[*] Stopping services...")
+        print("\nStopping ValiGuard...")
+        return 0
+    finally:
+        for process in reversed(processes):
+            terminate_process(process)
+
+
+def cleanup_for_tests(processes: List[subprocess.Popen]) -> None:
+    """Test helper documenting the same Windows taskkill cleanup path."""
+    for process in reversed(processes):
+        terminate_process(process)
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        raise SystemExit(main())
+    except RuntimeError as exc:
+        print(f"[x] {exc}", file=sys.stderr)
+        raise SystemExit(1)

@@ -20,6 +20,22 @@ def _severity_enum(value: str) -> SeverityLevel:
     return SeverityLevel(str(value).lower())
 
 
+def _get_or_create_default_bridge(session, chain_name: str) -> Bridge:
+    """Default bridge for a chain (address `bridge:<chain>:default`)."""
+    address = f"bridge:{chain_name.lower()}:default"
+    bridge = session.query(Bridge).filter_by(address=address).first()
+    if bridge is None:
+        from database.models import BridgeStatus
+        bridge = Bridge(
+            address=address,
+            chain_name=chain_name,
+            status=BridgeStatus.ACTIVE,
+        )
+        session.add(bridge)
+        session.flush()
+    return bridge
+
+
 def score_and_persist_transaction(
     *,
     session,
@@ -62,12 +78,23 @@ def score_and_persist_transaction(
 
     transaction = session.query(Transaction).filter_by(tx_hash=tx_hash).first()
     if transaction is None:
-        if bridge_id is None and (sender or receiver):
-            known_addresses = [address for address in (sender, receiver) if address]
-            bridge = session.query(Bridge).filter(
-                Bridge.address.in_(known_addresses)
-            ).first()
-            bridge_id = bridge.id if bridge else None
+        if bridge_id is None:
+            # Resolve the bridge FK: exact match on sender/receiver first, then
+            # fall back to the default bridge for the source chain (the same
+            # convention as app.get_or_create_bridge). Without the fallback,
+            # any tx whose sender is not itself a bridge address violates the
+            # NOT NULL transactions.bridge_id constraint.
+            bridge = None
+            if sender or receiver:
+                known_addresses = [a for a in (sender, receiver) if a]
+                bridge = session.query(Bridge).filter(
+                    Bridge.address.in_(known_addresses)
+                ).first()
+            if bridge is None:
+                bridge = _get_or_create_default_bridge(
+                    session, source_chain or "QIE"
+                )
+            bridge_id = bridge.id
         transaction = Transaction(
             tx_hash=tx_hash,
             bridge_id=bridge_id,

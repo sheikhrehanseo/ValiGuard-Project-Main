@@ -76,7 +76,9 @@ export default function Dashboard() {
 
     // Feature Toggle States
     // Feature Toggle States
-    const [dataSource, setDataSource] = useState('MOCK'); // 'MOCK' or 'REAL'
+    const [dataSource, setDataSource] = useState(
+        process.env.NEXT_PUBLIC_DEMO_MODE === 'true' ? 'REAL' : 'MOCK'
+    ); // 'MOCK' or 'REAL'
     const [walletAddress, setWalletAddress] = useState(null);
     const [backendStatus, setBackendStatus] = useState('unknown'); // 'online', 'offline', 'unknown'
 
@@ -229,12 +231,21 @@ export default function Dashboard() {
                 amt: tx.value == null ? '—' : `${tx.value} QIE`,
                 severity: tx.severity,
                 raw_entry: tx.raw_entry,
+                status: tx.status,
             }, ...prev.slice(0, 9)]);
+        });
+
+        socket.on('new_anomaly', (anomaly) => {
+            setStats(prev => ({ ...prev, anomalies24h: prev.anomalies24h + 1 }));
+            setTransactions(prev => prev.map(tx => (
+                tx.hash.startsWith((anomaly.tx_hash || '').substring(0, 10))
+                    ? { ...tx, severity: anomaly.severity }
+                    : tx
+            )));
         });
 
         socket.on('new_alert', (alert) => {
             setLiveAlerts(prev => [alert, ...prev].slice(0, 20));
-            setStats(prev => ({ ...prev, anomalies24h: prev.anomalies24h + 1 }));
         });
 
         socket.on('alert_resolved', (resolved) => {
@@ -589,9 +600,17 @@ export default function Dashboard() {
                                                         <td className="p-4 font-mono text-slate-400">{tx.from}</td>
                                                         <td className="p-4 font-medium">{tx.amt}</td>
                                                         <td className="p-4">
-                                                            {tx.raw_entry ? (
-                                                                <span className="px-2 py-1 rounded bg-slate-700 text-slate-300 text-xs font-semibold">RAW</span>
-                                                            ) : <span className="text-slate-500">-</span>}
+                                                            <div className="flex items-center gap-1">
+                                                                {tx.raw_entry && (
+                                                                    <span className="px-2 py-1 rounded bg-slate-700 text-slate-300 text-xs font-semibold">RAW</span>
+                                                                )}
+                                                                {tx.status === 'pending' && (
+                                                                    <span className="px-2 py-1 rounded bg-amber-500/20 text-amber-400 text-xs font-semibold animate-pulse">PENDING</span>
+                                                                )}
+                                                                {!tx.raw_entry && tx.status !== 'pending' && (
+                                                                    <span className="text-slate-500">-</span>
+                                                                )}
+                                                            </div>
                                                         </td>
                                                         <td className="p-4">
                                                             {tx.severity ? (

@@ -30,7 +30,6 @@ if _BACKEND_DIR not in sys.path:
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from flask_socketio import SocketIO, join_room
 from pydantic import BaseModel, ValidationError, Field, field_validator
 from pythonjsonlogger import jsonlogger
 import requests
@@ -72,6 +71,7 @@ from core.severity import (
     severity_from_score as _canonical_severity_from_score,
 )
 from core.scoring import score_and_persist_transaction
+from socket_manager import SocketManager
 
 # ===== CONFIGURATION =====
 app = Flask(__name__)
@@ -81,58 +81,16 @@ CORS(app, resources={r"/api/*": {
     "allow_headers": ["Content-Type", "Authorization", "X-API-Key"],
 }})
 
-# ===== WEBSOCKET REAL-TIME FEED (Phase 2 — Live Alert Stream) =====
-# Threading async_mode matches the ingestion worker's background-thread
-# design (no eventlet/gevent monkey-patching required).
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
-
-
-@socketio.on("connect")
-def _handle_socket_connect():
-    """Every dashboard client joins the shared 'dashboard' room."""
-    join_room("dashboard")
+# ===== WEBSOCKET REAL-TIME FEED =====
+# The manager keeps all live-event payloads and Socket.IO wiring separate from
+# REST handlers and the ingestion worker.
+socket_manager = SocketManager(app)
+socketio = socket_manager.socketio
 
 
 def _emit_transaction_events(tx: Dict[str, Any]) -> None:
-    """
-    Push a newly ingested transaction to all dashboard clients over the
-    WebSocket feed. Called from the ingestion worker via on_new_transaction.
-    """
-    from core.severity import severity_from_score
-
-    timestamp = tx.get("timestamp")
-    anomaly_score = tx.get("anomaly_score")
-    severity = tx.get("severity")
-    if severity is None:
-        severity = severity_from_score(anomaly_score) if anomaly_score is not None else "low"
-    payload = {
-        "tx_hash": tx.get("tx_hash"),
-        "value": tx.get("value"),
-        "sender": tx.get("sender"),
-        "receiver": tx.get("receiver"),
-        "status": tx.get("status"),
-        "anomaly_score": anomaly_score,
-        "risk_score": tx.get("risk_score", anomaly_score),
-        "is_flagged": tx.get("is_flagged"),
-        "raw_entry": tx.get("raw_entry", tx.get("sender") is None),
-        "severity": severity,
-        "reason": tx.get("reason"),
-        "source_chain": tx.get("source_chain"),
-        "destination_chain": tx.get("destination_chain"),
-        "timestamp": timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp),
-    }
-    socketio.emit("new_transaction", payload, to="dashboard")
-    # Alert-level events for the live alert feed (matches DB Medium+ rule).
-    if payload["is_flagged"] or is_alerting_severity(payload["severity"]):
-        socketio.emit("new_alert", {
-            "tx_hash": payload["tx_hash"],
-            "severity": payload["severity"],
-            "anomaly_score": payload["anomaly_score"],
-            "risk_score": payload["risk_score"],
-            "reason": payload["reason"],
-            "message": f"Anomaly score {payload['anomaly_score']:.1f} on {payload['tx_hash']}",
-            "timestamp": payload["timestamp"],
-        }, to="dashboard")
+    """Publish a transaction after its persistence transaction commits."""
+    socket_manager.emit_transaction(tx)
 
 # Configuration
 API_KEY = os.getenv("VALIGUARD_API_KEY", "dev-key-change-in-production")
@@ -301,8 +259,13 @@ def validate_request_data(data: Dict, model_class: BaseModel) -> tuple[Optional[
 # ===== INITIALIZE MANAGERS =====
 qie_manager = QIENodeManager()
 
-# Initialize anomaly model singleton (Task 5.2)
-anomaly_model = get_model()
+# Initialize anomaly model singleton (Task 5.2).
+# Absolute path: the default is cwd-relative ("backend/ml/models"), which
+# only resolves when launched from the project root — under pytest or other
+# cwds the trained model would silently not load.
+anomaly_model = get_model(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "ml", "models")
+)
 logger.info(f"Anomaly model loaded: {anomaly_model.get_model_info()}")
 
 # ===== DATABASE INITIALIZATION (Phase 1 — Database Wiring) =====# Initialize a DatabaseManager at app startup. SQLite by default (file-based for
@@ -323,14 +286,14 @@ def _start_node_status_broadcaster(interval: float = 10.0) -> None:
         while True:
             try:
                 telemetry = _fetch_node_telemetry()
-                socketio.emit("node_status", {
+                socket_manager.emit_node_status({
                     "online": telemetry.get("online", False),
                     "healthy": telemetry.get("synced", False),
                     "height": telemetry.get("block_height", 0),
                     "syncing": not telemetry.get("synced", False),
                     "rpc_url": qie_manager.rpc_url,
                     "chain_id": qie_manager.chain_id,
-                }, to="dashboard")
+                })
             except Exception as exc:  # noqa: BLE001 — broadcaster must not die
                 logger.debug("Node status broadcast failed: %s", exc)
             time.sleep(interval)
@@ -638,6 +601,46 @@ def get_anomaly_score():
         
         if not tx_data or "transaction_hash" not in tx_data:
             return error_response("Transaction hash required", "MISSING_FIELD", request_id)
+
+        # Live mock traffic uses the same worker callback as RPC-ingested
+        # transactions. Test/demo imports can disable the worker and retain
+        # the synchronous scorer path below.
+        if ingestion_worker is not None:
+            normalized = ingestion_worker.process_raw_transaction({
+                "hash": tx_data["transaction_hash"],
+                "source_chain": tx_data.get("source_chain", "QIE"),
+                "destination_chain": tx_data.get(
+                    "dest_chain", tx_data.get("destination_chain", "unknown")
+                ),
+                "amount": tx_data.get("amount", tx_data.get("value", 0.0)),
+                "sender": tx_data.get("sender", tx_data.get("from_address", "unknown")),
+                "receiver": tx_data.get("receiver", tx_data.get("to_address", "unknown")),
+            })
+            if normalized is None:
+                return error_response(
+                    f"Transaction hash already exists: {tx_data['transaction_hash']}",
+                    "DUPLICATE_TX_HASH",
+                    request_id,
+                    409,
+                )
+
+            with db_manager.get_session() as session:
+                persisted = session.query(Transaction).filter_by(
+                    tx_hash=normalized["tx_hash"]
+                ).one()
+                transaction_id = persisted.id
+
+            data = {
+                "transaction_hash": normalized["tx_hash"],
+                "anomaly_score": normalized["anomaly_score"],
+                "severity": normalized["severity"],
+                "model_confidence": None,
+                "reason": normalized.get("reason"),
+                "transaction_id": transaction_id,
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+            logger.info(f"Anomaly score calculated and persisted: {data}")
+            return jsonify(success_response(data, request_id)), 200
         
         try:
             with db_manager.get_session() as session:
@@ -664,7 +667,10 @@ def get_anomaly_score():
             )
 
         score_result = result["score"]
-        anomaly_score_100 = float(score_result["risk_score"])
+        # Honest scoring can return risk_score=None when no trained model is
+        # available — persisting the tx without a score is by design.
+        raw_risk = score_result.get("risk_score")
+        anomaly_score_100 = float(raw_risk) if raw_risk is not None else None
         severity = score_result["severity"]
         confidence = score_result["confidence"]
         reason = score_result["reason"]
@@ -892,7 +898,7 @@ def resolve_alert(alert_id: int):
         "is_resolved": True,
         "resolved_at": resolved_at.isoformat(),
     }
-    socketio.emit("alert_resolved", payload, to="dashboard")
+    socket_manager.emit_alert_resolved(payload)
     return jsonify(success_response(payload, request_id)), 200
 
 # ===== ANALYTICS ENDPOINTS =====
