@@ -102,6 +102,7 @@ def test_raw_entry_hash_nulls_pending_and_confirmation(tmp_path):
         assert transaction.value is None
         assert transaction.source_chain is None
         assert transaction.destination_chain is None
+        assert transaction.bridge_id is None
         assert transaction.status == TransactionStatus.PENDING
         detection = session.query(AnomalyDetection).one()
         assert "raw entry (volume unavailable)" in detection.reason
@@ -113,8 +114,10 @@ def test_raw_entry_hash_nulls_pending_and_confirmation(tmp_path):
     assert worker.poll_once() == []
     with database.get_session() as session:
         assert session.query(Transaction).count() == 1
-        assert session.query(Transaction).one().status == TransactionStatus.CONFIRMED
-        assert session.query(AnomalyDetection).count() == 2
+        confirmed_tx = session.query(Transaction).one()
+        assert confirmed_tx.status == TransactionStatus.CONFIRMED
+        assert confirmed_tx.bridge_id is None
+        assert session.query(AnomalyDetection).count() == 1
 
 
 def test_empty_mempool_creates_zero_records(tmp_path):
