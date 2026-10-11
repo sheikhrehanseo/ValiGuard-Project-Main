@@ -283,6 +283,12 @@ class TestValidatorStatsEmpty:
         assert data["total_transactions"] == 0
         assert data["validation_success_rate"] is None
         assert data["avg_anomaly_score"] == 0.0
+        assert data["severity_counts"] == {
+            "low": 0,
+            "medium": 0,
+            "high": 0,
+            "critical": 0,
+        }
 
 
 class TestDailyStatsSeeded:
@@ -304,3 +310,16 @@ class TestDailyStatsSeeded:
         assert data["validation_success_rate"] == 50.0
         assert data["avg_anomaly_score"] == 70.0
         assert data["high_alerts"] == 1
+
+    def test_real_daily_severity_counts(self, client, token):
+        r = client.get("/api/v1/analytics/daily-stats?date=2026-09-28",
+                       headers=_auth(token))
+        assert r.status_code == 200
+        data = r.get_json()["data"]
+        assert "severity_counts" in data
+        assert data["severity_counts"] == {
+            "low": 0,
+            "medium": 0,
+            "high": 1,
+            "critical": 0,
+        }

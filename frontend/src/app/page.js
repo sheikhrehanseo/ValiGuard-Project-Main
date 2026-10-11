@@ -1,7 +1,6 @@
-
 "use client";
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
     Shield,
     Activity,
@@ -15,14 +14,17 @@ import {
     ChevronRight,
     TrendingUp,
     Boxes,
-    MessageSquare,
-    Send,
-    Newspaper
+    Newspaper,
+    Filter,
+    Search,
+    RefreshCw,
+    X,
+    Lock
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 import WalletConnect from '../components/WalletConnect';
-import { authedFetch } from '../lib/api';
+import { authedFetch, isAuthenticated } from '../lib/api';
 import { io } from 'socket.io-client';
 import { Line, Bar } from 'react-chartjs-2';
 import {
@@ -59,9 +61,9 @@ const SEVERITY_STYLES = {
 };
 
 function formatTimeAgo(timestamp) {
-    if (!timestamp) return 'Unknown time';
+    if (!timestamp) return '—';
     const parsed = new Date(timestamp);
-    if (Number.isNaN(parsed.getTime())) return 'Unknown time';
+    if (Number.isNaN(parsed.getTime())) return '—';
 
     const seconds = Math.max(0, Math.floor((Date.now() - parsed.getTime()) / 1000));
     if (seconds < 60) return `${seconds}s ago`;
@@ -73,30 +75,21 @@ function formatTimeAgo(timestamp) {
 }
 
 export default function Dashboard() {
+    const isDemoModeEnabled = process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
+
     const [activeSection, setActiveSection] = useState('dashboard');
     const [sidebarOpen, setSidebarOpen] = useState(true);
     const [selectedNetwork, setSelectedNetwork] = useState('qie');
-
-    // AI Chat State
-    const [isChatOpen, setIsChatOpen] = useState(false);
-    const [chatInput, setChatInput] = useState('');
-    const [chatMessages, setChatMessages] = useState([
-        { role: 'ai', text: 'Hello! I am QIE-GPT. I am monitoring the Validator Node and Network Health. Ask me anything!' }
-    ]);
-
-    // UI States for Enhancements
-    const [trafficRange, setTrafficRange] = useState('24h');
     const [selectedNews, setSelectedNews] = useState(null);
 
-    // Feature Toggle States
-    // Feature Toggle States
+    // Feature Toggle: REAL is the default. MOCK survives ONLY behind NEXT_PUBLIC_DEMO_MODE=true.
     const [dataSource, setDataSource] = useState(
-        process.env.NEXT_PUBLIC_DEMO_MODE === 'true' ? 'REAL' : 'MOCK'
-    ); // 'MOCK' or 'REAL'
+        isDemoModeEnabled ? 'MOCK' : 'REAL'
+    );
     const [walletAddress, setWalletAddress] = useState(null);
     const [backendStatus, setBackendStatus] = useState('unknown'); // 'online', 'offline', 'unknown'
 
-    // Validator State
+    // Validator & Node State
     const [stats, setStats] = useState({
         activeBridges: null,
         anomalies24h: 0,
@@ -111,179 +104,290 @@ export default function Dashboard() {
         network: null
     });
 
-    // Live WebSocket state (REAL data source)
-    const [liveAlerts, setLiveAlerts] = useState([]);
-    const [socketStatus, setSocketStatus] = useState('disconnected');
+    // Daily Stats & Real Analytics
+    const [dailyStats, setDailyStats] = useState(null);
+    const [volumeHistory, setVolumeHistory] = useState([]);
+    const [validatorStats, setValidatorStats] = useState({
+        total_validators: null,
+        active_validators: null,
+        avg_uptime: null,
+        top_validators: []
+    });
 
+    // Live WebSocket & Transaction State
+    const [liveAlerts, setLiveAlerts] = useState([]);
     const [transactions, setTransactions] = useState([]);
     const [, setAgeTick] = useState(Date.now());
+
+    // Alerts Tab Search & History
+    const [alertHistory, setAlertHistory] = useState([]);
+    const [alertFilterSeverity, setAlertFilterSeverity] = useState('');
+    const [alertFilterResolved, setAlertFilterResolved] = useState('');
+    const [alertFilterTxHash, setAlertFilterTxHash] = useState('');
+    const [alertFilterFrom, setAlertFilterFrom] = useState('');
+    const [alertFilterTo, setAlertFilterTo] = useState('');
+    const [alertsLoading, setAlertsLoading] = useState(false);
 
     useEffect(() => {
         const interval = setInterval(() => setAgeTick(Date.now()), 1000);
         return () => clearInterval(interval);
     }, []);
 
-    // Wallet Connected Callback
     const handleWalletConnect = (address) => {
         setWalletAddress(address);
     };
 
-    // Real Data Fetching Logic (authenticated via authedFetch — Bearer JWT)
-    const fetchRealData = async () => {
+    // Open endpoint node status fetch (public, no auth needed)
+    const fetchPublicNodeStatus = useCallback(async () => {
         try {
-            // Fetch Node Status
-            const statusRes = await authedFetch('/api/v1/qie/node/status');
-            const statusData = await statusRes.json();
-
-            setBackendStatus('online'); // Connection success
-
-            if (statusData.success) {
-                setNodeStatus(prev => ({
-                    ...prev,
-                    height: statusData.data.node.height || prev.height,
-                    synced: statusData.data.node.healthy
-                }));
+            const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
+            const statusRes = await fetch(`${API_BASE}/api/v1/qie/node/status`);
+            if (statusRes.ok) {
+                const statusData = await statusRes.json();
+                setBackendStatus('online');
+                if (statusData.success && statusData.data?.node) {
+                    setNodeStatus(prev => ({
+                        ...prev,
+                        height: statusData.data.node.height ?? prev.height,
+                        synced: !!statusData.data.node.healthy
+                    }));
+                }
+            } else {
+                setBackendStatus('offline');
             }
+        } catch (error) {
+            console.warn("Public node status unavailable:", error);
+            setBackendStatus('offline');
+        }
+    }, []);
 
-            // Fetch Analytics / Daily Stats (requires auth — 401 falls through)
+    // Authenticated data fetcher (runs only when wallet is connected)
+    const fetchProtectedRealData = useCallback(async () => {
+        const authed = typeof window !== 'undefined' && (!!walletAddress || isAuthenticated());
+        if (!authed) return;
+
+        try {
+            setBackendStatus('online');
+
+            // 1. Fetch Daily Stats
             const statsRes = await authedFetch('/api/v1/analytics/daily-stats');
-            const statsData = await statsRes.json();
-            if (statsData.success) {
-                setStats(prev => ({
-                    ...prev,
-                    anomalies24h: statsData.data.anomalies_detected ?? prev.anomalies24h,
-                    // validation_success_rate is null on an empty day — keep the previous display value
-                    validationRate: statsData.data.validation_success_rate ?? prev.validationRate
-                }));
+            if (statsRes.ok) {
+                const statsData = await statsRes.json();
+                if (statsData.success) {
+                    setDailyStats(statsData.data);
+                    setStats(prev => ({
+                        ...prev,
+                        anomalies24h: statsData.data.anomalies_detected ?? prev.anomalies24h,
+                        validationRate: statsData.data.validation_success_rate ?? null
+                    }));
+                }
             }
 
+            // 2. Fetch Model Accuracy
             const modelRes = await authedFetch('/api/v1/analytics/model-accuracy');
-            const modelData = await modelRes.json();
-            if (modelData.success) {
-                setStats(prev => ({
-                    ...prev,
-                    modelAccuracy: modelData.data.accuracy ?? null,
-                }));
+            if (modelRes.ok) {
+                const modelData = await modelRes.json();
+                if (modelData.success) {
+                    setStats(prev => ({
+                        ...prev,
+                        modelAccuracy: modelData.data.accuracy ?? null,
+                    }));
+                }
             }
 
-            // Fetch History (Transactions)
-            const histRes = await authedFetch('/api/v1/bridge/history?limit=10');
-            const histData = await histRes.json();
-            if (histData.success) {
-                if (histData.data.transactions.length > 0) {
+            // 3. Fetch Validator Stats
+            const valRes = await authedFetch('/api/v1/analytics/validator-stats');
+            if (valRes.ok) {
+                const valData = await valRes.json();
+                if (valData.success) {
+                    setValidatorStats(valData.data);
+                    setStats(prev => ({
+                        ...prev,
+                        activeBridges: valData.data.active_validators ?? prev.activeBridges
+                    }));
+                }
+            }
+
+            // 4. Fetch Transaction History
+            const histRes = await authedFetch('/api/v1/bridge/history?limit=15');
+            if (histRes.ok) {
+                const histData = await histRes.json();
+                if (histData.success && Array.isArray(histData.data.transactions)) {
                     const mappedTxs = histData.data.transactions.map(tx => {
                         const txHash = tx.tx_hash || tx.transaction_hash || '';
                         const value = tx.value ?? tx.amount;
                         return {
-                        hash: txHash.substring(0, 10) + "...",
-                        type: "BridgeValidation",
-                        timestamp: tx.timestamp || tx.created_at,
-                        from: tx.sender ?? "—",
-                        amt: value == null ? "—" : value + " Token",
-                        severity: tx.severity,
-                        raw_entry: tx.raw_entry
+                            hash: txHash ? `${txHash.substring(0, 10)}...` : '—',
+                            full_hash: txHash,
+                            type: 'BridgeValidation',
+                            timestamp: tx.timestamp || tx.created_at,
+                            from: tx.sender || '—',
+                            amt: value == null ? '—' : `${value} QIE`,
+                            severity: tx.severity,
+                            raw_entry: tx.raw_entry,
+                            status: tx.status
                         };
                     });
                     setTransactions(mappedTxs);
-                } else {
-                    // Keep empty or show 'No Data'
                 }
             }
 
+            // 5. Fetch Volume History for Traffic Chart (last 7 days)
+            const dates = [];
+            for (let i = 6; i >= 0; i--) {
+                const d = new Date();
+                d.setUTCDate(d.getUTCDate() - i);
+                dates.push(d.toISOString().slice(0, 10));
+            }
+            const dailyResponses = await Promise.all(
+                dates.map(dateStr =>
+                    authedFetch(`/api/v1/analytics/daily-stats?date=${dateStr}`)
+                        .then(r => r.ok ? r.json() : { success: false })
+                        .catch(() => ({ success: false }))
+                )
+            );
+            const history = dates.map((dateStr, idx) => {
+                const res = dailyResponses[idx];
+                return {
+                    date: dateStr.slice(5),
+                    fullDate: dateStr,
+                    count: (res.success && res.data?.total_transactions) ? res.data.total_transactions : 0
+                };
+            });
+            setVolumeHistory(history);
+
         } catch (error) {
-            console.error("Failed to fetch real data:", error);
-            setBackendStatus('offline'); // Connection failed
+            console.error("Protected telemetry fetch error:", error);
+            setBackendStatus('offline');
+        }
+    }, [walletAddress]);
+
+    // Fetch Alerts with filter criteria
+    const fetchFilteredAlerts = useCallback(async () => {
+        const authed = typeof window !== 'undefined' && (!!walletAddress || isAuthenticated());
+        if (!authed) return;
+
+        setAlertsLoading(true);
+        try {
+            const params = new URLSearchParams();
+            if (alertFilterSeverity) params.set('severity', alertFilterSeverity);
+            if (alertFilterResolved) params.set('resolved', alertFilterResolved);
+            if (alertFilterTxHash.trim()) params.set('tx_hash', alertFilterTxHash.trim());
+            if (alertFilterFrom) params.set('from', alertFilterFrom);
+            if (alertFilterTo) params.set('to', alertFilterTo);
+            params.set('limit', '50');
+
+            const res = await authedFetch(`/api/v1/alerts?${params.toString()}`);
+            if (res.ok) {
+                const data = await res.json();
+                if (data.success && Array.isArray(data.data.items)) {
+                    setAlertHistory(data.data.items);
+                }
+            }
+        } catch (error) {
+            console.error("Failed to query alerts:", error);
+        } finally {
+            setAlertsLoading(false);
+        }
+    }, [walletAddress, alertFilterSeverity, alertFilterResolved, alertFilterTxHash, alertFilterFrom, alertFilterTo]);
+
+    // Handle Alert Resolution
+    const handleResolveAlert = async (alertId) => {
+        try {
+            const res = await authedFetch(`/api/v1/alerts/${alertId}/resolve`, { method: 'PATCH' });
+            if (res.ok) {
+                setLiveAlerts(prev => prev.map(a => a.id === alertId ? { ...a, is_resolved: true } : a));
+                setAlertHistory(prev => prev.map(a => a.id === alertId ? { ...a, is_resolved: true } : a));
+            }
+        } catch (err) {
+            console.error("Failed to resolve alert:", err);
         }
     };
 
-    // Effect for Data Updates (Mock vs Real)
+    // Periodic Polling Effect
     useEffect(() => {
         let interval;
 
-        if (dataSource === 'MOCK') {
-            // Reset to Mock Data if switching back
-            setBackendStatus('unknown');
-            setTransactions([]);
-            setLiveAlerts([]);
+        if (dataSource === 'MOCK' && isDemoModeEnabled) {
+            // Deterministic Demo Simulation (deterministic tick)
+            setBackendStatus('online');
             setNodeStatus({
                 synced: true,
                 height: 1245032,
-                moniker: 'ValiGuard AI Validator (simulation)',
-                network: 'simulation'
+                moniker: 'ValiGuard AI Validator (demo)',
+                network: 'demo'
             });
             setStats({
-                activeBridges: null,
-                anomalies24h: 0,
-                validationRate: null,
-                modelAccuracy: null
+                activeBridges: 4,
+                anomalies24h: 1,
+                validationRate: 98.5,
+                modelAccuracy: 94.2
             });
-            // --- MOCK LOGIC ---
+            let tick = 0;
             interval = setInterval(() => {
-                setNodeStatus(prev => ({ ...prev, height: prev.height + 1 }));
-
-                // Add new Transaction
-                const newTx = {
-                    hash: "0x" + Math.random().toString(16).substr(2, 8) + "..." + Math.random().toString(16).substr(2, 4),
-                    type: ["MsgSend", "MsgDelegate", "MsgVote", "MsgWithdraw"][Math.floor(Math.random() * 4)],
-                    timestamp: new Date().toISOString(),
-                    from: "qie1..." + Math.random().toString(36).substr(2, 4),
-                    amt: (Math.random() * 1000).toFixed(2) + " QIE"
-                };
-
-                setTransactions(prev => [newTx, ...prev.slice(0, 9)]);
-
-                // Randomly toggle anomalies rarely
-                if (Math.random() > 0.95) {
-                    setStats(prev => ({ ...prev, anomalies24h: prev.anomalies24h + 1 }));
-                }
+                tick += 1;
+                setNodeStatus(prev => ({ ...prev, height: (prev.height || 1245000) + 1 }));
             }, 3000);
         } else {
-            // --- REAL LOGIC ---
-            setTransactions([]);
-            setLiveAlerts([]);
-            setNodeStatus({ synced: false, height: null, moniker: null, network: null });
-            setStats({
-                activeBridges: null,
-                anomalies24h: 0,
-                validationRate: null,
-                modelAccuracy: null
-            });
-            fetchRealData(); // Initial fetch
-            interval = setInterval(fetchRealData, 5000); // Poll every 5s
+            // REAL Mode: always fetch open node status
+            fetchPublicNodeStatus();
+
+            // If authenticated, poll protected endpoints
+            if (walletAddress || isAuthenticated()) {
+                fetchProtectedRealData();
+                fetchFilteredAlerts();
+            }
+
+            interval = setInterval(() => {
+                fetchPublicNodeStatus();
+                if (walletAddress || isAuthenticated()) {
+                    fetchProtectedRealData();
+                }
+            }, 5000);
         }
 
         return () => clearInterval(interval);
-    }, [dataSource]);
+    }, [dataSource, isDemoModeEnabled, walletAddress, fetchPublicNodeStatus, fetchProtectedRealData, fetchFilteredAlerts]);
 
-    // WebSocket live feed (REAL data source): instant push of transactions,
-    // alerts, and node status from the ingestion worker. 5s polling above
-    // remains as fallback/reconciliation.
+    // When alert filters change and user is on alerts tab, re-fetch
+    useEffect(() => {
+        if (activeSection === 'alerts' && (walletAddress || isAuthenticated())) {
+            fetchFilteredAlerts();
+        }
+    }, [activeSection, walletAddress, fetchFilteredAlerts]);
+
+    // WebSocket live feed (REAL data source: open by design, stays active pre-auth)
     useEffect(() => {
         if (dataSource !== 'REAL') return;
 
         const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
         const socket = io(API_BASE, { transports: ['websocket', 'polling'] });
 
-        socket.on('connect', () => setSocketStatus('connected'));
-        socket.on('disconnect', () => setSocketStatus('disconnected'));
+        socket.on('connect', () => {
+            setBackendStatus('online');
+        });
+        socket.on('disconnect', () => {
+            // socket disconnected
+        });
 
         socket.on('new_transaction', (tx) => {
             setTransactions(prev => [{
-                hash: (tx.tx_hash || '').substring(0, 10) + '...',
+                hash: tx.tx_hash ? `${tx.tx_hash.substring(0, 10)}...` : '—',
+                full_hash: tx.tx_hash,
                 type: 'BridgeValidation',
                 timestamp: tx.timestamp || tx.created_at,
-                from: (tx.sender || 'network').substring(0, 10) + '...',
+                from: tx.sender || '—',
                 amt: tx.value == null ? '—' : `${tx.value} QIE`,
                 severity: tx.severity,
                 raw_entry: tx.raw_entry,
                 status: tx.status,
-            }, ...prev.slice(0, 9)]);
+            }, ...prev.slice(0, 14)]);
         });
 
         socket.on('new_anomaly', (anomaly) => {
-            setStats(prev => ({ ...prev, anomalies24h: prev.anomalies24h + 1 }));
+            setStats(prev => ({ ...prev, anomalies24h: (prev.anomalies24h || 0) + 1 }));
             setTransactions(prev => prev.map(tx => (
-                tx.hash.startsWith((anomaly.tx_hash || '').substring(0, 10))
+                tx.full_hash === anomaly.tx_hash
                     ? { ...tx, severity: anomaly.severity }
                     : tx
             )));
@@ -300,74 +404,41 @@ export default function Dashboard() {
             setLiveAlerts(prev => prev.filter(alert => (
                 alert.id !== resolved.alert_id && alert.tx_hash !== resolved.tx_hash
             )));
+            setAlertHistory(prev => prev.map(alert => (
+                alert.id === resolved.alert_id ? { ...alert, is_resolved: true } : alert
+            )));
         });
 
         socket.on('node_status', (ns) => {
             setNodeStatus(prev => ({
                 ...prev,
-                height: ns.height || prev.height,
-                synced: ns.healthy,
+                height: ns.height ?? prev.height,
+                synced: !!ns.healthy,
             }));
         });
 
         return () => socket.disconnect();
     }, [dataSource]);
 
+    // Honest Derived Metrics
+    const isAuthed = typeof window !== 'undefined' && (!!walletAddress || isAuthenticated());
+    const totalTransactions24h = dailyStats?.total_transactions ?? null;
+    const derivedTps = (typeof totalTransactions24h === 'number' && totalTransactions24h > 0)
+        ? (totalTransactions24h / 86400).toFixed(4)
+        : '—';
 
-    // Handle Chat Submit
-    const handleChatSubmit = () => {
-        if (!chatInput.trim()) return;
+    // Real Severity Distribution Computations
+    const severityCounts = dailyStats?.severity_counts || { low: 0, medium: 0, high: 0, critical: 0 };
+    const totalSeverityDetections = (severityCounts.low || 0) + (severityCounts.medium || 0) + (severityCounts.high || 0) + (severityCounts.critical || 0);
 
-        const newMsgs = [...chatMessages, { role: 'user', text: chatInput }];
-        setChatMessages(newMsgs);
-        const currentInput = chatInput;
-        setChatInput('');
+    const severityPercentages = totalSeverityDetections > 0 ? {
+        low: Math.round(((severityCounts.low || 0) / totalSeverityDetections) * 100),
+        medium: Math.round(((severityCounts.medium || 0) / totalSeverityDetections) * 100),
+        high: Math.round(((severityCounts.high || 0) / totalSeverityDetections) * 100),
+        critical: Math.round(((severityCounts.critical || 0) / totalSeverityDetections) * 100),
+    } : { low: 0, medium: 0, high: 0, critical: 0 };
 
-        // AI Response Logic
-        setTimeout(() => {
-            let response = "I'm processing that request...";
-            const lowerInput = currentInput.toLowerCase();
-
-            if (lowerInput.includes('status') || lowerInput.includes('health')) {
-                response = "✅ Node Status: HEALTHY. Block height is syncing normally (Height: 14,245,022). No critical alerts.";
-            }
-            else if (lowerInput.includes('risk') || lowerInput.includes('anomaly')) {
-                response = "🛡️ AI Risk Analysis: Current network risk is LOW (0.12%). 0 Anomaly detected in last hour.";
-            }
-            else if (lowerInput.includes('hello') || lowerInput.includes('hi') || lowerInput.includes('hey')) {
-                response = "Hello! I'm QIE-GPT. I can help you with Validator Status, Transaction Audits, Risk Scores, and Bridge Stats. What do you need?";
-            }
-            else if (lowerInput.includes('last transaction') || lowerInput.includes('latest') || lowerInput.includes('tx')) {
-                response = "The latest transaction 0x3f2...9a1 was processed 1.2s ago. Type: Cross-Chain Transfer. Amount: 450 QIE. Destination: Ethereum.";
-            }
-            else if (lowerInput.includes('transaction') || lowerInput.includes('audit')) {
-                response = "I can audit specific transactions for fraud patterns. Please paste a Transaction Hash (e.g., 0x123...) or ask for the 'latest transaction'.";
-            }
-            else if (lowerInput.includes('balance') || lowerInput.includes('funds')) {
-                response = walletAddress
-                    ? `💳 Wallet Analysis: Address ${walletAddress.substring(0, 6)}... holds approx 1,000.00 QIE (Demo Balance). No suspicious drains detected.`
-                    : "Please connect your wallet first so I can analyze your balance.";
-            }
-            else if (lowerInput.includes('price') || lowerInput.includes('market')) {
-                response = "💰 QIE Token Price: $1.24 (+5.2%). 24h Volume: $12.5M. Market Sentiment: Bullish 🚀";
-            }
-            else if (lowerInput.includes('bridge') || lowerInput.includes('cross')) {
-                response = "🌉 Bridge Status: Operational. All routes (ETH, BSC, SOL) are active. Average finality time: 4.5s.";
-            }
-            else {
-                // Randomized fallback to make it feel less static
-                const fallbacks = [
-                    "I've logged that query. Could you specify a module? (e.g., 'Risk', 'Bridge', 'Validator')",
-                    "I'm scanning the mempool... No specific anomalies found for that keyword.",
-                    "Is this regarding a specific Validator or Transaction? Please provide more context.",
-                    "My current model is tuned for Blockchain Forensics. Try asking about 'Risk Scores' or 'Latest Transactions'."
-                ];
-                response = fallbacks[Math.floor(Math.random() * fallbacks.length)];
-            }
-
-            setChatMessages([...newMsgs, { role: 'ai', text: response }]);
-        }, 800);
-    };
+    const hasTrafficVolume = volumeHistory.some(v => v.count > 0);
 
     return (
         <div className="flex h-screen bg-slate-900 text-slate-100 font-sans overflow-hidden">
@@ -376,7 +447,7 @@ export default function Dashboard() {
             <motion.aside
                 initial={{ x: -300 }}
                 animate={{ x: sidebarOpen ? 0 : -300 }}
-                className={`fixed md:relative z-40 w-64 h-full bg-slate-800 border-r border-slate-700 flex flex-col transition-transform duration-300`}
+                className="fixed md:relative z-40 w-64 h-full bg-slate-800 border-r border-slate-700 flex flex-col transition-transform duration-300"
             >
                 <div className="p-6 border-b border-slate-700 flex items-center gap-3">
                     <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-600 rounded-xl flex items-center justify-center shadow-lg shadow-blue-500/20">
@@ -459,29 +530,28 @@ export default function Dashboard() {
                     </button>
 
                     <div className="flex items-center gap-4 ml-auto">
-
-                        {/* Data Source Toggle */}
-                        <div className="flex items-center bg-slate-900 rounded-lg p-1 border border-slate-700 mr-2">
-                            <button
-                                onClick={() => setDataSource('MOCK')}
-                                className={`px-3 py-1 rounded-md text-xs font-bold transition-all ${dataSource === 'MOCK' ? 'bg-blue-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}
-                            >
-                                MOCK
-                            </button>
-                            <button
-                                onClick={() => setDataSource('REAL')}
-                                className={`px-3 py-1 rounded-md text-xs font-bold transition-all flex items-center gap-2 ${dataSource === 'REAL' ? 'bg-green-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}
-                            >
-                                {backendStatus === 'offline' && <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>}
-                                {backendStatus === 'online' && <span className="w-2 h-2 rounded-full bg-green-300"></span>}
-                                REAL
-                            </button>
-                        </div>
-                        <div className={`hidden lg:block text-xs font-semibold ${dataSource === 'REAL' ? 'text-green-400' : 'text-blue-400'}`}>
-                            {dataSource === 'REAL'
-                                ? 'REAL MODE = Live backend/QIE pipeline'
-                                : 'MOCK MODE = Simulation only'}
-                        </div>
+                        {/* Data Source Display */}
+                        {isDemoModeEnabled ? (
+                            <div className="flex items-center bg-slate-900 rounded-lg p-1 border border-slate-700 mr-2">
+                                <button
+                                    onClick={() => setDataSource('MOCK')}
+                                    className={`px-3 py-1 rounded-md text-xs font-bold transition-all ${dataSource === 'MOCK' ? 'bg-blue-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}
+                                >
+                                    MOCK
+                                </button>
+                                <button
+                                    onClick={() => setDataSource('REAL')}
+                                    className={`px-3 py-1 rounded-md text-xs font-bold transition-all flex items-center gap-2 ${dataSource === 'REAL' ? 'bg-green-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}
+                                >
+                                    REAL
+                                </button>
+                            </div>
+                        ) : (
+                            <div className="flex items-center gap-2 bg-slate-900/80 border border-emerald-500/30 px-3 py-1.5 rounded-lg text-xs font-semibold text-emerald-400 mr-2">
+                                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                                REAL MODE
+                            </div>
+                        )}
 
                         {/* Wallet Connect Button */}
                         <WalletConnect onConnect={handleWalletConnect} />
@@ -499,33 +569,53 @@ export default function Dashboard() {
                             ))}
                         </div>
 
-                        <button className="relative text-slate-400 hover:text-white transition">
+                        <button onClick={() => setActiveSection('alerts')} className="relative text-slate-400 hover:text-white transition">
                             <Bell className="w-5 h-5" />
-                            <span className="absolute -top-1 -right-1 w-2 h-2 bg-red-500 rounded-full animate-ping" />
+                            {liveAlerts.length > 0 && (
+                                <span className="absolute -top-1 -right-1 w-2 h-2 bg-red-500 rounded-full animate-ping" />
+                            )}
                         </button>
-
-                        <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-blue-500 to-cyan-400 border-2 border-slate-800" />
                     </div>
                 </header>
 
                 {/* Scrollable Content */}
                 <div className="flex-1 overflow-y-auto p-6 md:p-8 scroll-smooth">
-                    <div className="max-w-7xl mx-auto space-y-8">
+                    <div className="max-w-7xl mx-auto space-y-6">
+
+                        {/* Offline Alert Banner */}
+                        {backendStatus === 'offline' && (
+                            <div className="bg-red-500/10 border border-red-500/30 text-red-400 px-4 py-3 rounded-xl flex items-center justify-between text-sm">
+                                <div className="flex items-center gap-2">
+                                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                                    <span>Backend unreachable — Unable to communicate with ValiGuard API. Verify the backend service is running.</span>
+                                </div>
+                                <button
+                                    onClick={fetchPublicNodeStatus}
+                                    className="text-xs bg-red-500/20 hover:bg-red-500/30 px-3 py-1 rounded text-red-300 transition-colors flex items-center gap-1"
+                                >
+                                    <RefreshCw className="w-3 h-3" /> Retry
+                                </button>
+                            </div>
+                        )}
 
                         {/* Header Section */}
                         <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
                             <div>
                                 <h2 className="text-3xl font-bold text-white capitalize">{activeSection.replace('-', ' ')}</h2>
-                                <p className="text-slate-400 mt-1">Real-time monitoring and security insights</p>
+                                <p className="text-slate-400 mt-1">Real-time validator monitoring and anomaly intelligence</p>
                             </div>
                             <div className="text-right hidden md:block">
-                                <div className="text-sm text-slate-500">Last updated</div>
-                                <div className="font-mono text-green-400">Just now</div>
+                                <div className="text-sm text-slate-500">Pipeline status</div>
+                                <div className="font-mono text-green-400 text-sm flex items-center gap-1 justify-end">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-green-400"></span> Live feed active
+                                </div>
                             </div>
                         </div>
 
-                        {/* Dynamic Content Switching */}
+                        {/* Dynamic Section Rendering */}
                         <AnimatePresence mode="wait">
+
+                            {/* DASHBOARD TAB */}
                             {activeSection === 'dashboard' && (
                                 <motion.div
                                     key="dashboard"
@@ -540,88 +630,117 @@ export default function Dashboard() {
                                         <MetricCard label="Active Bridges" value={stats.activeBridges ?? '—'} icon={Boxes} color="blue" />
                                         <MetricCard label="Anomalies (24h)" value={stats.anomalies24h ?? '—'} icon={AlertTriangle} color="red" />
                                         <MetricCard label="Validation Rate" value={stats.validationRate == null ? '—' : `${stats.validationRate}%`} icon={CheckCircle} color="green" />
-                                        <MetricCard label="Model Prediction" value={stats.modelAccuracy == null ? '—' : `${stats.modelAccuracy}%`} icon={TrendingUp} color="purple" />
+                                        <MetricCard label="Model Accuracy" value={stats.modelAccuracy == null ? '—' : `${stats.modelAccuracy}%`} icon={TrendingUp} color="purple" />
                                     </div>
 
-                                    {/* Charts Area with Mock Visuals */}
+                                    {/* Charts Area */}
                                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                                        {/* 1. Transaction Volume Chart (backed by /api/v1/analytics/daily-stats) */}
                                         <div className="lg:col-span-2 bg-slate-800 rounded-2xl border border-slate-700 p-6 shadow-xl">
-                                            <h3 className="text-lg font-semibold mb-4">Transaction Volume (24h)</h3>
+                                            <div className="flex justify-between items-center mb-4">
+                                                <h3 className="text-lg font-semibold text-white">Transaction Volume (Last 7 Days)</h3>
+                                                <span className="text-xs text-slate-400 font-mono">daily-stats</span>
+                                            </div>
                                             <div className="h-64 w-full">
-                                                <Line
-                                                    data={{
-                                                        labels: ['00:00', '02:00', '04:00', '06:00', '08:00', '10:00', '12:00', '14:00', '16:00', '18:00', '20:00', '22:00'],
-                                                        datasets: [
-                                                            {
-                                                                label: 'Transactions',
-                                                                data: [65, 59, 80, 81, 56, 55, 40, 70, 45, 90, 100, 85],
-                                                                fill: true,
-                                                                backgroundColor: 'rgba(59, 130, 246, 0.2)', // blue-500/20
-                                                                borderColor: '#3b82f6', // blue-500
-                                                                tension: 0.4,
-                                                                pointRadius: 0
-                                                            }
-                                                        ]
-                                                    }}
-                                                    options={{
-                                                        responsive: true,
-                                                        maintainAspectRatio: false,
-                                                        plugins: {
-                                                            legend: {
-                                                                display: false
-                                                            },
-                                                            tooltip: {
-                                                                mode: 'index',
-                                                                intersect: false,
-                                                            }
-                                                        },
-                                                        scales: {
-                                                            x: {
-                                                                grid: {
-                                                                    display: false,
-                                                                    drawBorder: false
-                                                                },
-                                                                ticks: {
-                                                                    color: '#94a3b8' // slate-400
+                                                {!isAuthed ? (
+                                                    <div className="h-full flex flex-col items-center justify-center text-slate-400 text-center p-4">
+                                                        <Lock className="w-8 h-8 mb-2 text-slate-500" />
+                                                        <p className="text-sm font-medium text-slate-300">Connect wallet to view telemetry</p>
+                                                        <p className="text-xs text-slate-500 mt-1">Historical analytics endpoints require wallet authentication.</p>
+                                                    </div>
+                                                ) : !hasTrafficVolume ? (
+                                                    <div className="h-full flex flex-col items-center justify-center text-slate-500 text-center p-4">
+                                                        <BarChart3 className="w-8 h-8 mb-2 opacity-30" />
+                                                        <p className="text-sm font-medium">No transaction volume recorded</p>
+                                                        <p className="text-xs text-slate-600 mt-1">Transaction counts will populate as transactions are validated.</p>
+                                                    </div>
+                                                ) : (
+                                                    <Line
+                                                        data={{
+                                                            labels: volumeHistory.map(v => v.date),
+                                                            datasets: [
+                                                                {
+                                                                    label: 'Transactions',
+                                                                    data: volumeHistory.map(v => v.count),
+                                                                    fill: true,
+                                                                    backgroundColor: 'rgba(59, 130, 246, 0.2)',
+                                                                    borderColor: '#3b82f6',
+                                                                    tension: 0.3,
+                                                                    pointRadius: 3,
+                                                                    pointBackgroundColor: '#3b82f6'
                                                                 }
+                                                            ]
+                                                        }}
+                                                        options={{
+                                                            responsive: true,
+                                                            maintainAspectRatio: false,
+                                                            plugins: {
+                                                                legend: { display: false },
+                                                                tooltip: { mode: 'index', intersect: false }
                                                             },
-                                                            y: {
-                                                                grid: {
-                                                                    color: '#334155', // slate-700
-                                                                    drawBorder: false
+                                                            scales: {
+                                                                x: {
+                                                                    grid: { display: false, drawBorder: false },
+                                                                    ticks: { color: '#94a3b8' }
                                                                 },
-                                                                ticks: {
-                                                                    color: '#94a3b8'
+                                                                y: {
+                                                                    beginAtZero: true,
+                                                                    grid: { color: '#334155', drawBorder: false },
+                                                                    ticks: { color: '#94a3b8', precision: 0 }
                                                                 }
                                                             }
-                                                        }
-                                                    }}
-                                                />
+                                                        }}
+                                                    />
+                                                )}
                                             </div>
                                         </div>
+
+                                        {/* 2. Real Risk Distribution (computed from daily-stats severity_counts) */}
                                         <div className="bg-slate-800 rounded-2xl border border-slate-700 p-6 shadow-xl">
-                                            <h3 className="text-lg font-semibold mb-4">Risk Distribution</h3>
+                                            <div className="flex justify-between items-center mb-4">
+                                                <h3 className="text-lg font-semibold text-white">Risk Distribution</h3>
+                                                <span className="text-xs text-slate-400 font-mono">ML Core</span>
+                                            </div>
                                             <div className="h-64 flex flex-col justify-center gap-4">
-                                                {['Low Risk', 'Medium Risk', 'High Risk', 'Critical Risk'].map((label, i) => (
-                                                    <div key={label}>
-                                                        <div className="flex justify-between text-sm mb-1 text-slate-400">
-                                                            <span>{label}</span>
-                                                            <span>{['75%', '15%', '7%', '3%'][i]}</span>
-                                                        </div>
-                                                        <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
-                                                            <div
-                                                                className={`h-full rounded-full ${['bg-blue-500', 'bg-yellow-500', 'bg-orange-500', 'bg-red-500'][i]}`}
-                                                                style={{ width: ['75%', '15%', '7%', '3%'][i] }}
-                                                            ></div>
-                                                        </div>
+                                                {!isAuthed ? (
+                                                    <div className="h-full flex flex-col items-center justify-center text-slate-400 text-center p-4">
+                                                        <Lock className="w-8 h-8 mb-2 text-slate-500" />
+                                                        <p className="text-sm font-medium text-slate-300">Connect wallet to view risk distribution</p>
                                                     </div>
-                                                ))}
+                                                ) : totalSeverityDetections === 0 ? (
+                                                    <div className="h-full flex flex-col items-center justify-center text-slate-500 text-center p-4">
+                                                        <AlertTriangle className="w-8 h-8 mb-2 opacity-30" />
+                                                        <p className="text-sm font-medium">No risk evaluations recorded</p>
+                                                        <p className="text-xs text-slate-600 mt-1">Severity percentages calculate upon scoring.</p>
+                                                    </div>
+                                                ) : (
+                                                    [
+                                                        { label: 'Low Risk', key: 'low', color: 'bg-blue-500', pct: severityPercentages.low, count: severityCounts.low },
+                                                        { label: 'Medium Risk', key: 'medium', color: 'bg-yellow-500', pct: severityPercentages.medium, count: severityCounts.medium },
+                                                        { label: 'High Risk', key: 'high', color: 'bg-orange-500', pct: severityPercentages.high, count: severityCounts.high },
+                                                        { label: 'Critical Risk', key: 'critical', color: 'bg-red-500', pct: severityPercentages.critical, count: severityCounts.critical },
+                                                    ].map((item) => (
+                                                        <div key={item.key}>
+                                                            <div className="flex justify-between text-sm mb-1 text-slate-400">
+                                                                <span>{item.label} ({item.count})</span>
+                                                                <span className="font-mono text-slate-200">{item.pct}%</span>
+                                                            </div>
+                                                            <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
+                                                                <div
+                                                                    className={`h-full rounded-full ${item.color} transition-all duration-500`}
+                                                                    style={{ width: `${item.pct}%` }}
+                                                                ></div>
+                                                            </div>
+                                                        </div>
+                                                    ))
+                                                )}
                                             </div>
                                         </div>
                                     </div>
                                 </motion.div>
                             )}
 
+                            {/* TRANSACTIONS TAB */}
                             {activeSection === 'transactions' && (
                                 <motion.div
                                     key="transactions"
@@ -630,8 +749,9 @@ export default function Dashboard() {
                                     exit={{ opacity: 0, y: -20 }}
                                     className="bg-slate-800 rounded-2xl border border-slate-700 overflow-hidden shadow-xl"
                                 >
-                                    <div className="p-6 border-b border-slate-700">
-                                        <h3 className="text-xl font-bold">Latest Transactions</h3>
+                                    <div className="p-6 border-b border-slate-700 flex justify-between items-center">
+                                        <h3 className="text-xl font-bold text-white">Transactions Feed</h3>
+                                        <span className="text-xs text-slate-400">Live WebSockets + History</span>
                                     </div>
                                     <div className="overflow-x-auto">
                                         <table className="w-full text-left border-collapse">
@@ -647,78 +767,130 @@ export default function Dashboard() {
                                                 </tr>
                                             </thead>
                                             <tbody className="divide-y divide-slate-700">
-                                                {transactions.map((tx, i) => (
-                                                    <tr key={i} className="hover:bg-slate-700/30 transition-colors">
-                                                        <td className="p-4 font-mono text-blue-400">{tx.hash}</td>
-                                                        <td className="p-4"><span className="px-2 py-1 rounded bg-slate-700 text-xs">{tx.type}</span></td>
-                                                        <td className="p-4 text-slate-400">{formatTimeAgo(tx.timestamp)}</td>
-                                                        <td className="p-4 font-mono text-slate-400">{tx.from}</td>
-                                                        <td className="p-4 font-medium">{tx.amt}</td>
-                                                        <td className="p-4">
-                                                            <div className="flex items-center gap-1">
-                                                                {tx.raw_entry && (
-                                                                    <span className="px-2 py-1 rounded bg-slate-700 text-slate-300 text-xs font-semibold">RAW</span>
-                                                                )}
-                                                                {tx.status === 'pending' && (
-                                                                    <span className="px-2 py-1 rounded bg-amber-500/20 text-amber-400 text-xs font-semibold animate-pulse">PENDING</span>
-                                                                )}
-                                                                {!tx.raw_entry && tx.status !== 'pending' && (
-                                                                    <span className="text-slate-500">-</span>
-                                                                )}
-                                                            </div>
-                                                        </td>
-                                                        <td className="p-4">
-                                                            {tx.severity ? (
-                                                                <span className={`px-2 py-1 rounded text-xs font-semibold ${SEVERITY_STYLES[tx.severity]?.bg || 'bg-slate-700'} ${SEVERITY_STYLES[tx.severity]?.text || 'text-slate-300'}`}>
-                                                                    {SEVERITY_STYLES[tx.severity]?.label || tx.severity}
-                                                                </span>
-                                                            ) : <span className="text-slate-500">-</span>}
+                                                {transactions.length === 0 ? (
+                                                    <tr>
+                                                        <td colSpan={7} className="p-8 text-center text-slate-400">
+                                                            No transactions recorded yet. Transactions will appear in real time as processed.
                                                         </td>
                                                     </tr>
-                                                ))}
+                                                ) : (
+                                                    transactions.map((tx, i) => (
+                                                        <tr key={tx.full_hash || i} className="hover:bg-slate-700/30 transition-colors">
+                                                            <td className="p-4 font-mono text-blue-400">{tx.hash}</td>
+                                                            <td className="p-4"><span className="px-2 py-1 rounded bg-slate-700 text-xs">{tx.type}</span></td>
+                                                            <td className="p-4 text-slate-400">{formatTimeAgo(tx.timestamp)}</td>
+                                                            <td className="p-4 font-mono text-slate-400">{tx.from}</td>
+                                                            <td className="p-4 font-medium">{tx.amt}</td>
+                                                            <td className="p-4">
+                                                                <div className="flex items-center gap-1">
+                                                                    {tx.raw_entry && (
+                                                                        <span className="px-2 py-1 rounded bg-slate-700 text-slate-300 text-xs font-semibold">RAW</span>
+                                                                    )}
+                                                                    {tx.status === 'pending' && (
+                                                                        <span className="px-2 py-1 rounded bg-amber-500/20 text-amber-400 text-xs font-semibold animate-pulse">PENDING</span>
+                                                                    )}
+                                                                    {!tx.raw_entry && tx.status !== 'pending' && (
+                                                                        <span className="text-slate-500">—</span>
+                                                                    )}
+                                                                </div>
+                                                            </td>
+                                                            <td className="p-4">
+                                                                {tx.severity ? (
+                                                                    <span className={`px-2 py-1 rounded text-xs font-semibold ${SEVERITY_STYLES[tx.severity]?.bg || 'bg-slate-700'} ${SEVERITY_STYLES[tx.severity]?.text || 'text-slate-300'}`}>
+                                                                        {SEVERITY_STYLES[tx.severity]?.label || tx.severity}
+                                                                    </span>
+                                                                ) : <span className="text-slate-500">—</span>}
+                                                            </td>
+                                                        </tr>
+                                                    ))
+                                                )}
                                             </tbody>
                                         </table>
                                     </div>
                                 </motion.div>
                             )}
 
+                            {/* VALIDATORS TAB (backed by /api/v1/analytics/validator-stats) */}
                             {activeSection === 'validators' && (
                                 <motion.div
                                     key="validators"
                                     initial={{ opacity: 0 }}
                                     animate={{ opacity: 1 }}
-                                    className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"
+                                    className="space-y-6"
                                 >
-                                    {[1, 2, 3, 4, 5, 6].map((v) => (
-                                        <div key={v} className="bg-slate-800 p-6 rounded-2xl border border-slate-700 hover:border-blue-500/50 transition-all">
-                                            <div className="flex items-center gap-4 mb-4">
-                                                <div className="w-12 h-12 rounded-full bg-slate-700 flex items-center justify-center text-xl">
-                                                    {['👑', '🛡️', '⚡', '🔒', '🌐', '💎'][v - 1]}
-                                                </div>
-                                                <div>
-                                                    <h4 className="font-bold">{['Cosmos Hub', 'Smart Stake', 'ValiGuard AI', 'Everstake', 'Polkachu', 'Imperator'][v - 1]}</h4>
-                                                    <div className="text-xs text-slate-400 flex items-center gap-1">
-                                                        <div className="w-2 h-2 rounded-full bg-green-500"></div>
-                                                        Active
+                                    <div className="flex justify-between items-center">
+                                        <h3 className="text-xl font-bold text-white">Network Validators</h3>
+                                        <span className="text-xs text-slate-400 font-mono">/api/v1/analytics/validator-stats</span>
+                                    </div>
+
+                                    {!isAuthed ? (
+                                        <div className="bg-slate-800 p-12 rounded-2xl border border-slate-700 text-center flex flex-col items-center">
+                                            <Lock className="w-10 h-10 mb-3 text-slate-500" />
+                                            <h4 className="text-lg font-bold text-white">Connect Wallet to View Validators</h4>
+                                            <p className="text-sm text-slate-400 mt-1 max-w-md">Validator stake distribution, voting power, and RPC telemetry require authentication.</p>
+                                        </div>
+                                    ) : (!validatorStats.top_validators || validatorStats.top_validators.length === 0) ? (
+                                        <div className="bg-slate-800 p-12 rounded-2xl border border-slate-700 text-center text-slate-400">
+                                            No validators found in the database.
+                                        </div>
+                                    ) : (
+                                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                            {validatorStats.top_validators.map((v, i) => (
+                                                <div key={v.address || i} className="bg-slate-800 p-6 rounded-2xl border border-slate-700 hover:border-blue-500/50 transition-all">
+                                                    <div className="flex items-center justify-between mb-4">
+                                                        <div className="flex items-center gap-3">
+                                                            <div className="w-10 h-10 rounded-full bg-slate-700 flex items-center justify-center text-lg">
+                                                                🛡️
+                                                            </div>
+                                                            <div>
+                                                                <h4 className="font-bold text-white">{v.name || `Validator ${i + 1}`}</h4>
+                                                                <div className="text-xs text-slate-400 font-mono">
+                                                                    {(v.address || '').substring(0, 10)}...{(v.address || '').slice(-4)}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                        <div className="flex items-center gap-1.5">
+                                                            {/* Honesty badge for voting power source (rpc | db) */}
+                                                            <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-slate-900 text-slate-300 border border-slate-700" title={`Voting power source: ${v.source}`}>
+                                                                {v.source || 'db'}
+                                                            </span>
+                                                            <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${v.is_active ? 'bg-green-500/10 text-green-400 border border-green-500/20' : 'bg-slate-700 text-slate-400'}`}>
+                                                                {v.is_active ? 'Active' : 'Inactive'}
+                                                            </span>
+                                                        </div>
+                                                    </div>
+                                                    <div className="space-y-2 text-sm border-t border-slate-700/50 pt-3">
+                                                        <div className="flex justify-between">
+                                                            <span className="text-slate-400">Voting Power</span>
+                                                            <span className="font-mono text-white">
+                                                                {v.voting_power != null ? `${v.voting_power}%` : '—'}
+                                                            </span>
+                                                        </div>
+                                                        <div className="flex justify-between">
+                                                            <span className="text-slate-400">Stake</span>
+                                                            <span className="font-mono text-white">
+                                                                {v.stake_amount != null ? `${Number(v.stake_amount).toLocaleString()} QIE` : '—'}
+                                                            </span>
+                                                        </div>
+                                                        <div className="flex justify-between">
+                                                            <span className="text-slate-400">Uptime</span>
+                                                            <span className={v.uptime != null && v.uptime >= 95 ? 'text-green-400 font-mono' : 'text-yellow-400 font-mono'}>
+                                                                {v.uptime != null ? `${v.uptime}%` : '—'}
+                                                            </span>
+                                                        </div>
+                                                        <div className="flex justify-between text-xs text-slate-500 pt-1">
+                                                            <span>Transactions: {v.transactions ?? '—'}</span>
+                                                            <span>Alerts: {v.alerts ?? '—'}</span>
+                                                        </div>
                                                     </div>
                                                 </div>
-                                            </div>
-                                            <div className="space-y-2 text-sm">
-                                                <div className="flex justify-between">
-                                                    <span className="text-slate-500">Voting Power</span>
-                                                    <span className="font-mono">{(Math.random() * 5 + 1).toFixed(2)}%</span>
-                                                </div>
-                                                <div className="flex justify-between">
-                                                    <span className="text-slate-500">Uptime</span>
-                                                    <span className="text-green-400">99.9{v}%</span>
-                                                </div>
-                                            </div>
+                                            ))}
                                         </div>
-                                    ))}
+                                    )}
                                 </motion.div>
                             )}
 
-                            {/* News Section */}
+                            {/* NEWS TAB */}
                             {activeSection === 'news' && (
                                 <motion.div
                                     key="news"
@@ -728,14 +900,14 @@ export default function Dashboard() {
                                     className="space-y-6"
                                 >
                                     <h2 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-400">
-                                        QIE Ecosystem News 📰
+                                        QIE Ecosystem Updates 📰
                                     </h2>
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                         {[
-                                            { title: "QIE V3 Mainnet Upgrade Successful", date: "Today", desc: "The highly anticipated V3 upgrade brings 10x throughput and EVM compatibility enhancement.", tag: "Tech", content: "The QIE Foundation is proud to announce the successful deployment of the V3 Mainnet. This upgrade introduces parallel transaction processing, reducing finality time to under 500ms. Validators are required to upgrade their nodes within 24 hours to maintain consensus participation." },
-                                            { title: "ValiGuard AI Partners with QIE Foundation", date: "Today", desc: "ValiGuard AI selected as the official security partner for the cross-chain bridge initiative.", tag: "Partnership", content: "ValiGuard AI has entered a strategic partnership with the QIE Foundation to secure over $500M in cross-chain assets. This collaboration will see the integration of ValiGuard's AI-driven anomaly detection models directly into the QIE Bridge protocol." },
-                                            { title: "TVL on QIE Breaches $100M Milestone", date: "Yesterday", desc: "Total Value Locked across DeFi protocols on QIE network has reached a new all-time high.", tag: "Growth", content: "Defying market trends, the Total Value Locked (TVL) on the QIE network surged past $100M this week, driven by the launch of new lending protocols and high-yield farming opportunities. User activity has increased by 300% month-over-month." },
-                                            { title: "New Grant Program for AI Developers", date: "2 days ago", desc: "QIE Foundation allocates $5M fund for developers building AI agents on-chain.", tag: "Community", content: "To foster innovation at the intersection of AI and Blockchain, the QIE Foundation has launched a $5M ecosystem grant. The program specifically targets developers building autonomous agents, decentralized inference networks, and AI-governed DAOs." },
+                                            { title: "QIE Network Node Protocol Upgrade", date: "Recent", desc: "Tendermint consensus engine optimized for high-throughput block evaluation.", tag: "Tech", content: "The QIE consensus engine incorporates real-time mempool inspection and Tendermint RPC endpoints. Validator telemetry is recorded with cryptographic block hashes." },
+                                            { title: "ValiGuard AI Anomaly Pipeline Active", date: "Recent", desc: "Machine learning isolation forest model evaluates transactions in real time.", tag: "Security", content: "ValiGuard AI applies unsupervised machine learning algorithms to incoming transactions, flagging deviations in transaction volume, temporal patterns, and cross-chain routing." },
+                                            { title: "Validator Telemetry and Stake Governance", date: "Recent", desc: "Voting power derives from on-chain stake and RPC validator voting weight.", tag: "Governance", content: "Network validators participate in consensus with voting power measured by stake distributions and validated block proposals." },
+                                            { title: "Multi-Chain Routing Security Framework", date: "Recent", desc: "Strict address matching ensures transactions associate strictly with verified bridges.", tag: "Infrastructure", content: "ValiGuard eliminates fabricated bridge mappings, guaranteeing bridge identifiers correspond to verified smart contract addresses on the ledger." },
                                         ].map((news, i) => (
                                             <div
                                                 key={i}
@@ -777,23 +949,16 @@ export default function Dashboard() {
                                                             onClick={() => setSelectedNews(null)}
                                                             className="absolute top-4 right-4 bg-black/20 hover:bg-black/40 text-white p-2 rounded-full backdrop-blur-md transition-colors"
                                                         >
-                                                            ✕
+                                                            <X size={18} />
                                                         </button>
                                                         <span className="inline-block w-fit bg-white/20 text-white text-xs px-2 py-1 rounded-full mb-2">{selectedNews.tag}</span>
-                                                        <h2 className="text-3xl font-bold text-white mb-1">{selectedNews.title}</h2>
+                                                        <h2 className="text-2xl font-bold text-white mb-1">{selectedNews.title}</h2>
                                                         <p className="text-white/80">{selectedNews.date}</p>
                                                     </div>
                                                     <div className="p-8 space-y-4">
-                                                        <p className="text-slate-300 leading-relaxed text-lg">
+                                                        <p className="text-slate-300 leading-relaxed text-base">
                                                             {selectedNews.content || selectedNews.desc}
                                                         </p>
-
-                                                        <div className="pt-6 border-t border-slate-800 flex justify-between items-center">
-                                                            <button className="text-blue-400 hover:text-blue-300 font-medium flex items-center gap-2">
-                                                                Share Article <Send size={16} />
-                                                            </button>
-                                                            <span className="text-slate-600 text-sm">Read time: 3 min</span>
-                                                        </div>
                                                     </div>
                                                 </motion.div>
                                             </motion.div>
@@ -802,43 +967,186 @@ export default function Dashboard() {
                                 </motion.div>
                             )}
 
+                            {/* ALERTS TAB & AUDIT SEARCH UI (Step 9) */}
                             {activeSection === 'alerts' && (
                                 <motion.div
                                     key="alerts"
                                     initial={{ opacity: 0 }}
                                     animate={{ opacity: 1 }}
-                                    className="space-y-4"
+                                    className="space-y-6"
                                 >
-                                    {liveAlerts.length === 0 && (
-                                        <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl text-slate-400 text-sm">
-                                            No live alerts yet. Alerts appear here in real time as the ingestion worker scores transactions.
+                                    {/* Alert Filter Toolbar backed by /api/v1/alerts */}
+                                    <div className="bg-slate-800 p-5 rounded-2xl border border-slate-700 space-y-4 shadow-xl">
+                                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-slate-700/60 pb-3">
+                                            <div className="flex items-center gap-2">
+                                                <Filter className="w-4 h-4 text-blue-400" />
+                                                <h3 className="font-semibold text-white text-base">Alert History Audit Filters</h3>
+                                            </div>
+                                            <span className="text-xs text-slate-400 font-mono">GET /api/v1/alerts</span>
                                         </div>
-                                    )}
-                                    {liveAlerts.map((alert, i) => {
-                                        const style = SEVERITY_STYLES[alert.severity] || SEVERITY_STYLES.low;
-                                        const Icon = style.icon;
-                                        return (
-                                            <div key={alert.tx_hash || i} className={`${style.bg} ${style.border} p-4 rounded-xl flex items-start gap-4`}>
-                                                <Icon className={`${style.text} w-6 h-6 shrink-0 mt-1`} />
-                                                <div>
-                                                    <h4 className={`font-bold ${style.text} capitalize`}>
-                                                        {style.label} anomaly detected
-                                                    </h4>
-                                                    <p className="text-slate-300 text-sm mt-1">{alert.message}</p>
-                                                    <div className="mt-2 text-xs text-slate-500 flex items-center gap-2">
-                                                        <span>{formatTimeAgo(alert.timestamp)}</span>
-                                                        <span>•</span>
-                                                        <span className="font-mono">{(alert.tx_hash || '').substring(0, 12)}...</span>
-                                                        <span>•</span>
-                                                        <span>Score: {typeof alert.anomaly_score === 'number' ? alert.anomaly_score.toFixed(1) : alert.anomaly_score}</span>
-                                                    </div>
+
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+                                            {/* Severity Filter */}
+                                            <div>
+                                                <label className="text-xs text-slate-400 block mb-1">Severity</label>
+                                                <select
+                                                    value={alertFilterSeverity}
+                                                    onChange={e => setAlertFilterSeverity(e.target.value)}
+                                                    className="w-full bg-slate-900 border border-slate-700 rounded-lg text-sm text-slate-200 px-3 py-2 outline-none focus:border-blue-500"
+                                                >
+                                                    <option value="">All Tiers</option>
+                                                    <option value="critical">Critical</option>
+                                                    <option value="high">High</option>
+                                                    <option value="medium">Medium</option>
+                                                    <option value="low">Low</option>
+                                                </select>
+                                            </div>
+
+                                            {/* Resolution Filter */}
+                                            <div>
+                                                <label className="text-xs text-slate-400 block mb-1">Status</label>
+                                                <select
+                                                    value={alertFilterResolved}
+                                                    onChange={e => setAlertFilterResolved(e.target.value)}
+                                                    className="w-full bg-slate-900 border border-slate-700 rounded-lg text-sm text-slate-200 px-3 py-2 outline-none focus:border-blue-500"
+                                                >
+                                                    <option value="">All Statuses</option>
+                                                    <option value="false">Unresolved</option>
+                                                    <option value="true">Resolved</option>
+                                                </select>
+                                            </div>
+
+                                            {/* Tx Hash Filter */}
+                                            <div className="lg:col-span-2">
+                                                <label className="text-xs text-slate-400 block mb-1">Transaction Hash</label>
+                                                <div className="relative">
+                                                    <input
+                                                        type="text"
+                                                        value={alertFilterTxHash}
+                                                        onChange={e => setAlertFilterTxHash(e.target.value)}
+                                                        placeholder="Filter by tx hash..."
+                                                        className="w-full bg-slate-900 border border-slate-700 rounded-lg text-sm text-slate-200 px-3 py-2 pl-8 outline-none focus:border-blue-500 font-mono"
+                                                    />
+                                                    <Search className="w-4 h-4 text-slate-500 absolute left-2.5 top-2.5" />
                                                 </div>
                                             </div>
-                                        );
-                                    })}
+
+                                            {/* Filter Actions */}
+                                            <div className="flex items-end gap-2">
+                                                <button
+                                                    onClick={fetchFilteredAlerts}
+                                                    className="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-medium px-4 py-2 rounded-lg text-sm transition-colors flex items-center justify-center gap-1.5"
+                                                >
+                                                    <Filter className="w-3.5 h-3.5" /> Apply
+                                                </button>
+                                                <button
+                                                    onClick={() => {
+                                                        setAlertFilterSeverity('');
+                                                        setAlertFilterResolved('');
+                                                        setAlertFilterTxHash('');
+                                                        setAlertFilterFrom('');
+                                                        setAlertFilterTo('');
+                                                    }}
+                                                    className="bg-slate-700 hover:bg-slate-600 text-slate-300 px-3 py-2 rounded-lg text-sm transition-colors"
+                                                    title="Reset filters"
+                                                >
+                                                    Reset
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Alert Items List */}
+                                    {!isAuthed ? (
+                                        <div className="bg-slate-800 p-8 rounded-2xl border border-slate-700 text-center flex flex-col items-center">
+                                            <Lock className="w-8 h-8 mb-2 text-slate-500" />
+                                            <p className="text-sm font-medium text-slate-300">Connect wallet to search and audit alert history</p>
+                                            <p className="text-xs text-slate-500 mt-1">Live WebSocket alerts remain visible above; persisted database search requires authentication.</p>
+                                        </div>
+                                    ) : alertsLoading ? (
+                                        <div className="p-8 text-center text-slate-400">Loading alerts from database...</div>
+                                    ) : (alertHistory.length === 0 && liveAlerts.length === 0) ? (
+                                        <div className="bg-slate-800 border border-slate-700 p-8 rounded-2xl text-center text-slate-400">
+                                            No alerts match the selected criteria.
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-3">
+                                            {(alertHistory.length > 0 ? alertHistory : liveAlerts).map((alert, i) => {
+                                                const sev = (alert.severity || 'low').toLowerCase();
+                                                const style = SEVERITY_STYLES[sev] || SEVERITY_STYLES.low;
+                                                const Icon = style.icon;
+                                                const isResolved = !!alert.is_resolved;
+
+                                                return (
+                                                    <div
+                                                        key={alert.id || alert.tx_hash || i}
+                                                        className={`${style.bg} ${style.border} border p-5 rounded-2xl flex flex-col md:flex-row md:items-center justify-between gap-4 transition-all`}
+                                                    >
+                                                        <div className="flex items-start gap-4">
+                                                            <div className={`p-2 rounded-xl bg-slate-900/50 shrink-0 mt-0.5`}>
+                                                                <Icon className={`${style.text} w-5 h-5`} />
+                                                            </div>
+                                                            <div>
+                                                                <div className="flex items-center gap-2">
+                                                                    <h4 className={`font-bold ${style.text} capitalize text-base`}>
+                                                                        {style.label} Alert
+                                                                    </h4>
+                                                                    {isResolved ? (
+                                                                        <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                                                                            Resolved
+                                                                        </span>
+                                                                    ) : (
+                                                                        <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                                                                            Active
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+
+                                                                {/* Reasoning Display (page.js:827-834 contract preserved) */}
+                                                                <p className="text-slate-200 text-sm mt-1">{alert.message || alert.reason || 'Flagged by ML model'}</p>
+
+                                                                {alert.reason && alert.reason !== alert.message && (
+                                                                    <p className="text-xs text-slate-400 mt-1 italic">
+                                                                        Reasoning: {alert.reason}
+                                                                    </p>
+                                                                )}
+
+                                                                <div className="mt-2 text-xs text-slate-500 flex flex-wrap items-center gap-2">
+                                                                    <span>{formatTimeAgo(alert.timestamp || alert.created_at)}</span>
+                                                                    <span>•</span>
+                                                                    <span className="font-mono text-slate-400">{alert.tx_hash ? `${alert.tx_hash.substring(0, 16)}...` : '—'}</span>
+                                                                    <span>•</span>
+                                                                    <span>Score: {alert.anomaly_score != null ? Number(alert.anomaly_score).toFixed(1) : '—'}</span>
+                                                                    {alert.model_confidence != null && (
+                                                                        <>
+                                                                            <span>•</span>
+                                                                            <span>Confidence: {alert.model_confidence}%</span>
+                                                                        </>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+
+                                                        {/* Resolution Button */}
+                                                        {alert.id && !isResolved && (
+                                                            <div className="md:self-center shrink-0">
+                                                                <button
+                                                                    onClick={() => handleResolveAlert(alert.id)}
+                                                                    className="bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-emerald-500/30 text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5"
+                                                                >
+                                                                    <CheckCircle className="w-3.5 h-3.5" /> Mark Resolved
+                                                                </button>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
                                 </motion.div>
                             )}
 
+                            {/* ANALYTICS TAB */}
                             {activeSection === 'analytics' && (
                                 <motion.div
                                     key="analytics"
@@ -846,145 +1154,113 @@ export default function Dashboard() {
                                     animate={{ opacity: 1 }}
                                     className="space-y-6"
                                 >
-                                    {/* Analytics Summary Cards */}
+                                    {/* Analytics Summary Cards (Honest Real Metrics) */}
                                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                                         <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700">
-                                            <div className="text-slate-400 text-sm mb-1">Avg Block Time</div>
-                                            <div className="text-3xl font-bold flex items-end gap-2">
-                                                2.1s <span className="text-green-400 text-sm mb-1">(-0.2s)</span>
+                                            <div className="text-slate-400 text-sm mb-1">Average Anomaly Score</div>
+                                            <div className="text-3xl font-bold text-white">
+                                                {dailyStats?.avg_anomaly_score != null ? dailyStats.avg_anomaly_score : '—'}
                                             </div>
-                                            <div className="w-full bg-slate-700 h-1 mt-4 rounded-full overflow-hidden">
-                                                <div className="bg-green-500 h-full w-[85%]"></div>
-                                            </div>
+                                            <div className="text-xs text-slate-500 mt-2">Aggregated 24h risk mean</div>
                                         </div>
+
                                         <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700">
-                                            <div className="text-slate-400 text-sm mb-1">Peak TPS (24h)</div>
-                                            <div className="text-3xl font-bold flex items-end gap-2">
-                                                4,250 <span className="text-blue-400 text-sm mb-1">(+12%)</span>
+                                            <div className="text-slate-400 text-sm mb-1">Derived 24h TPS</div>
+                                            <div className="text-3xl font-bold text-white">
+                                                {derivedTps}
                                             </div>
-                                            <div className="w-full bg-slate-700 h-1 mt-4 rounded-full overflow-hidden">
-                                                <div className="bg-blue-500 h-full w-[65%]"></div>
-                                            </div>
+                                            <div className="text-xs text-slate-500 mt-2">Computed as: total_transactions / 86400</div>
                                         </div>
+
                                         <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700">
-                                            <div className="text-slate-400 text-sm mb-1">Total Gas Used</div>
-                                            <div className="text-3xl font-bold flex items-end gap-2">
-                                                85.2M <span className="text-purple-400 text-sm mb-1">Gwei</span>
+                                            <div className="text-slate-400 text-sm mb-1">Total Daily Transactions</div>
+                                            <div className="text-3xl font-bold text-white">
+                                                {dailyStats?.total_transactions != null ? dailyStats.total_transactions : '—'}
                                             </div>
-                                            <div className="w-full bg-slate-700 h-1 mt-4 rounded-full overflow-hidden">
-                                                <div className="bg-purple-500 h-full w-[45%]"></div>
-                                            </div>
+                                            <div className="text-xs text-slate-500 mt-2">Committed ledger transactions</div>
                                         </div>
                                     </div>
 
-                                    {/* Main Network Traffic Chart */}
+                                    {/* Main Network Traffic Chart (Derivation from daily-stats, never random) */}
                                     <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-xl">
                                         <div className="flex justify-between items-center mb-6">
-                                            <h3 className="text-lg font-bold">Network Traffic Load</h3>
-                                            <select
-                                                value={trafficRange}
-                                                onChange={(e) => setTrafficRange(e.target.value)}
-                                                className="bg-slate-900 border border-slate-700 rounded-lg text-sm text-slate-400 px-3 py-1 outline-none focus:border-blue-500 transition-colors"
-                                            >
-                                                <option value="3h">Last 3 Hours</option>
-                                                <option value="6h">Last 6 Hours</option>
-                                                <option value="24h">Last 24 Hours</option>
-                                                <option value="7d">Last 7 Days</option>
-                                            </select>
+                                            <div>
+                                                <h3 className="text-lg font-bold text-white">Network Traffic Load (Last 7 Days)</h3>
+                                                <p className="text-xs text-slate-400 mt-0.5">Real daily transaction counts from database</p>
+                                            </div>
                                         </div>
                                         <div className="h-64 w-full">
-                                            <Bar
-                                                data={{
-                                                    labels: Array.from({ length: 24 }).map((_, i) => `${i}:00`),
-                                                    datasets: [
-                                                        {
-                                                            label: 'Network Traffic (TPS)',
-                                                            data: Array.from({ length: 24 }).map(() => Math.floor(Math.random() * 5000) + 1000),
-                                                            backgroundColor: '#8b5cf6', // purple-500
-                                                            borderRadius: 4,
-                                                        }
-                                                    ]
-                                                }}
-                                                options={{
-                                                    responsive: true,
-                                                    maintainAspectRatio: false,
-                                                    plugins: {
-                                                        legend: {
-                                                            display: false
-                                                        },
-                                                        tooltip: {
-                                                            mode: 'index',
-                                                            intersect: false,
-                                                        }
-                                                    },
-                                                    scales: {
-                                                        x: {
-                                                            grid: {
-                                                                display: false,
-                                                                drawBorder: false
-                                                            },
-                                                            ticks: {
-                                                                color: '#94a3b8',
-                                                                maxTicksLimit: 12
+                                            {!isAuthed ? (
+                                                <div className="h-full flex flex-col items-center justify-center text-slate-400 text-center p-4">
+                                                    <Lock className="w-8 h-8 mb-2 text-slate-500" />
+                                                    <p className="text-sm font-medium text-slate-300">Connect wallet to view network traffic telemetry</p>
+                                                </div>
+                                            ) : !hasTrafficVolume ? (
+                                                <div className="h-full flex flex-col items-center justify-center text-slate-500 text-center p-4">
+                                                    <Activity className="w-8 h-8 mb-2 opacity-30" />
+                                                    <p className="text-sm font-medium">No network traffic data available</p>
+                                                    <p className="text-xs text-slate-600 mt-1">Traffic telemetry will populate from validated transactions.</p>
+                                                </div>
+                                            ) : (
+                                                <Bar
+                                                    data={{
+                                                        labels: volumeHistory.map(v => v.date),
+                                                        datasets: [
+                                                            {
+                                                                label: 'Daily Transactions',
+                                                                data: volumeHistory.map(v => v.count),
+                                                                backgroundColor: '#8b5cf6',
+                                                                borderRadius: 6,
                                                             }
+                                                        ]
+                                                    }}
+                                                    options={{
+                                                        responsive: true,
+                                                        maintainAspectRatio: false,
+                                                        plugins: {
+                                                            legend: { display: false },
+                                                            tooltip: { mode: 'index', intersect: false }
                                                         },
-                                                        y: {
-                                                            grid: {
-                                                                color: '#334155', // slate-700
-                                                                drawBorder: false
+                                                        scales: {
+                                                            x: {
+                                                                grid: { display: false, drawBorder: false },
+                                                                ticks: { color: '#94a3b8' }
                                                             },
-                                                            ticks: {
-                                                                color: '#94a3b8'
+                                                            y: {
+                                                                beginAtZero: true,
+                                                                grid: { color: '#334155', drawBorder: false },
+                                                                ticks: { color: '#94a3b8', precision: 0 }
                                                             }
                                                         }
-                                                    }
-                                                }}
-                                            />
+                                                    }}
+                                                />
+                                            )}
                                         </div>
                                     </div>
 
-                                    {/* Cross-Chain Bridge Stats */}
-                                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                                        <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700">
-                                            <h3 className="text-lg font-bold mb-4">Bridge Liquidity</h3>
-                                            <div className="space-y-4">
-                                                {['Ethereum', 'BSC', 'Polygon', 'Avalanche'].map((chain, i) => (
-                                                    <div key={chain} className="flex items-center justify-between">
-                                                        <div className="flex items-center gap-3">
-                                                            <div className={`w-3 h-3 rounded-full ${['bg-blue-500', 'bg-yellow-500', 'bg-purple-500', 'bg-red-500'][i]}`}></div>
-                                                            <span className="text-slate-300 font-medium">{chain}</span>
-                                                        </div>
-                                                        <div className="text-right">
-                                                            <div className="font-mono text-white">${(Math.random() * 5 + 1).toFixed(2)}M</div>
-                                                            <div className="text-xs text-slate-500 flex items-center justify-end gap-1">
-                                                                <TrendingUp className="w-3 h-3 text-green-500" />
-                                                                +{Math.floor(Math.random() * 10)}%
-                                                            </div>
-                                                        </div>
+                                    {/* Cross-Chain Bridge Breakdown */}
+                                    <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700">
+                                        <h3 className="text-lg font-bold mb-4 text-white">Cross-Chain Bridge Routes</h3>
+                                        <div className="space-y-4">
+                                            {['Ethereum', 'BSC', 'Polygon', 'Avalanche'].map((chain, i) => (
+                                                <div key={chain} className="flex items-center justify-between border-b border-slate-700/50 pb-3">
+                                                    <div className="flex items-center gap-3">
+                                                        <div className={`w-3 h-3 rounded-full ${['bg-blue-500', 'bg-yellow-500', 'bg-purple-500', 'bg-red-500'][i]}`}></div>
+                                                        <span className="text-slate-300 font-medium">{chain}</span>
                                                     </div>
-                                                ))}
-                                            </div>
-                                        </div>
-
-                                        <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700">
-                                            <h3 className="text-lg font-bold mb-4">Contract Calls Distribution</h3>
-                                            <div className="flex gap-2 h-4 mb-4 rounded-full overflow-hidden bg-slate-900">
-                                                <div className="w-[40%] bg-blue-500 h-full"></div>
-                                                <div className="w-[30%] bg-green-500 h-full"></div>
-                                                <div className="w-[20%] bg-purple-500 h-full"></div>
-                                                <div className="w-[10%] bg-yellow-500 h-full"></div>
-                                            </div>
-                                            <div className="grid grid-cols-2 gap-4 text-sm">
-                                                <div className="flex items-center gap-2"><div className="w-2 h-2 rounded-full bg-blue-500"></div> DeFis (40%)</div>
-                                                <div className="flex items-center gap-2"><div className="w-2 h-2 rounded-full bg-green-500"></div> NFTs (30%)</div>
-                                                <div className="flex items-center gap-2"><div className="w-2 h-2 rounded-full bg-purple-500"></div> Bridges (20%)</div>
-                                                <div className="flex items-center gap-2"><div className="w-2 h-2 rounded-full bg-yellow-500"></div> Gaming (10%)</div>
-                                            </div>
+                                                    <div className="text-right">
+                                                        <span className="px-2 py-1 rounded bg-slate-900 border border-slate-700 text-xs font-mono text-slate-300">
+                                                            Route Active
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                            ))}
                                         </div>
                                     </div>
                                 </motion.div>
                             )}
 
+                            {/* PROFILE TAB */}
                             {activeSection === 'profile' && (
                                 <motion.div
                                     key="profile"
@@ -996,16 +1272,31 @@ export default function Dashboard() {
                                         <div className="h-32 bg-gradient-to-r from-blue-600 to-purple-600 relative">
                                             <div className="absolute -bottom-12 left-8 w-24 h-24 rounded-full bg-slate-800 p-1">
                                                 <div className="w-full h-full rounded-full bg-slate-700 flex items-center justify-center text-4xl">
-                                                    👽
+                                                    🛡️
                                                 </div>
                                             </div>
                                         </div>
                                         <div className="pt-16 pb-8 px-8">
-                                            <h2 className="text-2xl font-bold">Validator Operator</h2>
+                                            <h2 className="text-2xl font-bold text-white">Validator Operator</h2>
                                             <p className="text-slate-400">admin@valiguard.ai</p>
                                             <div className="flex gap-2 mt-4">
                                                 <span className="px-3 py-1 rounded-full bg-green-500/10 text-green-400 text-xs border border-green-500/20">Active Validator</span>
-                                                <span className="px-3 py-1 rounded-full bg-blue-500/10 text-blue-400 text-xs border border-blue-500/20">Testnet</span>
+                                                <span className="px-3 py-1 rounded-full bg-blue-500/10 text-blue-400 text-xs border border-blue-500/20">QIE Network</span>
+                                            </div>
+
+                                            <div className="mt-6 border-t border-slate-700 pt-6 space-y-3">
+                                                <div className="flex justify-between text-sm">
+                                                    <span className="text-slate-400">Connected Wallet</span>
+                                                    <span className="font-mono text-slate-200">
+                                                        {walletAddress ? `${walletAddress.substring(0, 12)}...${walletAddress.slice(-6)}` : 'Not connected'}
+                                                    </span>
+                                                </div>
+                                                <div className="flex justify-between text-sm">
+                                                    <span className="text-slate-400">Auth Token Status</span>
+                                                    <span className="text-emerald-400 font-medium">
+                                                        {isAuthed ? 'JWT Authenticated (UC-01)' : 'Unauthenticated'}
+                                                    </span>
+                                                </div>
                                             </div>
                                         </div>
                                     </div>
@@ -1014,63 +1305,6 @@ export default function Dashboard() {
 
                         </AnimatePresence>
                     </div>
-                </div>
-
-                {/* QIE-GPT Floating Chat */}
-                <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end">
-                    <AnimatePresence>
-                        {isChatOpen && (
-                            <motion.div
-                                initial={{ opacity: 0, scale: 0.9, y: 20 }}
-                                animate={{ opacity: 1, scale: 1, y: 0 }}
-                                exit={{ opacity: 0, scale: 0.9, y: 20 }}
-                                className="mb-4 w-80 bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl overflow-hidden flex flex-col"
-                                style={{ height: '400px' }}
-                            >
-                                <div className="bg-gradient-to-r from-blue-600 to-purple-600 p-4 flex justify-between items-center">
-                                    <div className="flex items-center gap-2">
-                                        <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-                                        <span className="font-bold text-white">QIE-GPT Agent</span>
-                                    </div>
-                                    <button onClick={() => setIsChatOpen(false)} className="text-white/80 hover:text-white">✕</button>
-                                </div>
-
-                                <div className="flex-1 p-4 overflow-y-auto space-y-4 text-sm scrollbar-thin scrollbar-thumb-slate-700">
-                                    {chatMessages.map((msg, i) => (
-                                        <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                            <div className={`max-w-[80%] p-3 rounded-2xl ${msg.role === 'user' ? 'bg-blue-600 text-white rounded-tr-none' : 'bg-slate-800 text-slate-200 rounded-tl-none'}`}>
-                                                {msg.text}
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-
-                                <div className="p-3 bg-slate-800 border-t border-slate-700 flex gap-2">
-                                    <input
-                                        type="text"
-                                        value={chatInput}
-                                        onChange={(e) => setChatInput(e.target.value)}
-                                        onKeyDown={(e) => {
-                                            if (e.key === 'Enter') handleChatSubmit();
-                                        }}
-                                        placeholder="Ask AI..."
-                                        className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 text-slate-200 focus:outline-none focus:border-blue-500"
-                                    />
-                                    <button onClick={handleChatSubmit} className="bg-blue-600 p-2 rounded-xl text-white hover:bg-blue-700">
-                                        <Send size={18} />
-                                    </button>
-                                </div>
-                            </motion.div>
-                        )}
-                    </AnimatePresence>
-
-                    <button
-                        onClick={() => setIsChatOpen(!isChatOpen)}
-                        className="bg-gradient-to-r from-blue-600 to-purple-600 p-4 rounded-full shadow-lg text-white hover:scale-110 transition-transform flex items-center gap-2 group"
-                    >
-                        <MessageSquare size={24} />
-                        {!isChatOpen && <span className="max-w-0 overflow-hidden group-hover:max-w-xs transition-all duration-300 whitespace-nowrap px-0 group-hover:px-2">Ask QIE-GPT</span>}
-                    </button>
                 </div>
             </main>
         </div>
