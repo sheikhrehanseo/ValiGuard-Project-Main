@@ -963,6 +963,21 @@ def get_daily_stats():
             Alert.severity == SeverityLevel.HIGH
         ).count()
 
+        counts = dict(
+            session.query(
+                AnomalyDetection.severity, func.count(AnomalyDetection.id)
+            ).filter(
+                AnomalyDetection.detected_at >= target_date,
+                AnomalyDetection.detected_at < next_date
+            ).group_by(AnomalyDetection.severity).all()
+        )
+        severity_counts = {
+            "low": counts.get(SeverityLevel.LOW, 0),
+            "medium": counts.get(SeverityLevel.MEDIUM, 0),
+            "high": counts.get(SeverityLevel.HIGH, 0),
+            "critical": counts.get(SeverityLevel.CRITICAL, 0),
+        }
+
     data = {
         "date": date_str,
         "total_transactions": total_transactions,
@@ -970,7 +985,8 @@ def get_daily_stats():
         "validation_success_rate": validation_success_rate,
         "avg_anomaly_score": avg_anomaly_score,
         "critical_alerts": critical_alerts,
-        "high_alerts": high_alerts
+        "high_alerts": high_alerts,
+        "severity_counts": severity_counts,
     }
 
     return jsonify(success_response(data, request_id)), 200
