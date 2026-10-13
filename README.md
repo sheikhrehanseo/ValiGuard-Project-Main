@@ -22,7 +22,7 @@
 *   Node.js 16+
 *   WSL2 (for Windows users)
 
-### Installation
+### Installation & Setup
 
 1.  **Clone the repository**
     ```bash
@@ -37,13 +37,47 @@
     pip install -r requirements.txt
     ```
 
-3.  **Initialize Database**
+3.  **Setup Frontend Dependencies**
+    ```bash
+    cd frontend
+    npm install
+    cd ..
+    ```
+
+### ⚡ Run ValiGuard (Canonical One-Command Launcher)
+
+The canonical way to launch the full stack (Flask backend on port 5000, Alembic migrations, Next.js frontend on port 3001, and optional live traffic simulation) is using the project venv Python:
+
+```powershell
+# Windows (canonical venv command)
+.\venv\Scripts\python.exe start_project.py --demo --simulate
+```
+
+```bash
+# Linux / WSL
+./venv/bin/python start_project.py --demo --simulate
+```
+
+> **Note on Environment Robustness:** If `start_project.py` is invoked with another Python interpreter (e.g. `python start_project.py --demo --simulate`), it automatically detects the project `.\venv` and re-execs into it. If dependencies are missing, it runs an upfront preflight check with clear remediation instructions rather than crashing with a raw traceback.
+
+**Available Launcher Flags:**
+*   `--demo`: Runs without a live QIE node (node status reports offline honestly, no background RPC spam).
+*   `--simulate`: Starts the HTTP traffic generator to simulate live mainnet transaction streams.
+*   `--no-browser`: Prevents auto-opening the dashboard in your default browser.
+
+---
+
+### 🛠️ Alternative: Manual Service Startup
+
+If you prefer initializing and running services individually:
+
+1.  **Initialize Database**
     ```bash
     python backend/manage_db.py init
     python backend/manage_db.py seed
     ```
 
-4.  **Setup QIE Validator**
+2.  **Setup QIE Validator**
     ```bash
     # Setup node
     python backend/qie_setup_manager.py setup
@@ -52,19 +86,16 @@
     python backend/qie_validator_manager.py full
     ```
 
-5.  **Run Backend**
+3.  **Run Backend**
     ```bash
     python backend/app.py
     ```
 
-6.  **Run Frontend**
+4.  **Run Frontend**
     ```bash
     cd frontend
-    npm install
     npm run dev
     ```
-    
-    *The app will open at `http://localhost:3000`*
 
 ---
 

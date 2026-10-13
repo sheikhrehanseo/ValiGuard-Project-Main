@@ -13,11 +13,96 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import requests
+try:
+    import requests
+except ImportError:
+    requests = None  # type: ignore[assignment]
 
 ROOT = Path(__file__).resolve().parent
+VENV_DIR = ROOT / "venv"
 BACKEND_URL = "http://127.0.0.1:5000"
 FRONTEND_URL = "http://127.0.0.1:3001"
+REQUIRED_DEPENDENCIES = ("requests", "flask", "flask_socketio")
+
+
+def get_venv_python() -> Optional[Path]:
+    """Return the interpreter path inside the project's venv, if it exists."""
+    if os.name == "nt":
+        candidate = VENV_DIR / "Scripts" / "python.exe"
+    else:
+        candidate = VENV_DIR / "bin" / "python"
+    return candidate if candidate.is_file() else None
+
+
+def get_python_exe() -> Path:
+    """Return the project venv python if available, else current sys.executable."""
+    venv_python = get_venv_python()
+    if venv_python is not None:
+        return venv_python
+    return Path(sys.executable)
+
+
+def is_running_in_project_venv() -> bool:
+    """Check if the current process is already executing inside the project venv."""
+    venv_resolved = VENV_DIR.resolve()
+    try:
+        if Path(sys.prefix).resolve() == venv_resolved:
+            return True
+    except OSError:
+        pass
+    venv_python = get_venv_python()
+    if venv_python:
+        try:
+            if Path(sys.executable).resolve() == venv_python.resolve():
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def maybe_reexec_into_venv() -> None:
+    """Re-exec into the project venv if one exists and we are not already using it."""
+    if os.environ.get("VALIGUARD_REEXEC") == "1":
+        return
+    if is_running_in_project_venv():
+        return
+    venv_python = get_venv_python()
+    if not venv_python:
+        return
+
+    print(f"[*] Re-executing launcher using project venv: {venv_python}")
+    env = dict(os.environ)
+    env["VALIGUARD_REEXEC"] = "1"
+    cmd = [str(venv_python), str(ROOT / "start_project.py")] + sys.argv[1:]
+    if os.name != "nt":
+        os.execve(str(venv_python), cmd, env)
+    else:
+        try:
+            exit_code = subprocess.call(cmd, env=env)
+            sys.exit(exit_code)
+        except KeyboardInterrupt:
+            sys.exit(0)
+
+
+def check_dependencies(modules: tuple[str, ...] = REQUIRED_DEPENDENCIES) -> None:
+    """Dependency preflight: verify required packages can be imported without traceback."""
+    missing = []
+    for mod in modules:
+        try:
+            __import__(mod)
+        except ImportError:
+            missing.append(mod)
+    if missing:
+        venv_hint = (
+            r".\venv\Scripts\python.exe start_project.py"
+            if os.name == "nt"
+            else "./venv/bin/python start_project.py"
+        )
+        print(
+            f"Dependencies missing — run 'pip install -r requirements.txt' or use the project venv: {venv_hint}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def load_dotenv(path: Path = ROOT / ".env") -> None:
@@ -90,6 +175,11 @@ def check_ports_free() -> None:
 
 
 def wait_for_http(url: str, timeout: float, label: str) -> None:
+    global requests
+    if requests is None:
+        import requests as _requests
+        requests = _requests
+
     deadline = time.monotonic() + timeout
     last_error = "no response"
     while time.monotonic() < deadline:
@@ -127,9 +217,7 @@ def spawn(command: List[str], cwd: Path, env: Dict[str, str], label: str) -> sub
 
 
 def run_migrations(env: Dict[str, str]) -> None:
-    python_exe = ROOT / "venv" / "Scripts" / "python.exe"
-    if not python_exe.exists():
-        python_exe = Path(sys.executable)
+    python_exe = get_python_exe()
     result = subprocess.run(
         [str(python_exe), "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
         cwd=ROOT / "backend",
@@ -141,6 +229,7 @@ def run_migrations(env: Dict[str, str]) -> None:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    check_dependencies()
     args = build_parser().parse_args(argv)
     load_dotenv()
     env = configure_environment(args.demo)
@@ -148,9 +237,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     check_ports_free()
 
     run_migrations(env)
-    python_exe = ROOT / "venv" / "Scripts" / "python.exe"
-    if not python_exe.exists():
-        python_exe = Path(sys.executable)
+    python_exe = get_python_exe()
     npm = "npm.cmd" if os.name == "nt" else "npm"
     processes: List[subprocess.Popen] = []
 
@@ -197,6 +284,7 @@ def cleanup_for_tests(processes: List[subprocess.Popen]) -> None:
 
 
 if __name__ == "__main__":
+    maybe_reexec_into_venv()
     try:
         raise SystemExit(main())
     except RuntimeError as exc:

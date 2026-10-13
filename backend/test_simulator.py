@@ -20,6 +20,8 @@ import tempfile
 import threading
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).parent))
@@ -276,3 +278,69 @@ def test_launcher_port_conflict_error_names_pid(monkeypatch):
         assert "4242" in str(exc)
     else:
         raise AssertionError("expected RuntimeError on busy port")
+
+
+def test_launcher_dependency_preflight_success():
+    launcher = load_launcher()
+    # In test environment (project venv), required dependencies are installed
+    launcher.check_dependencies()
+
+
+def test_launcher_dependency_preflight_missing_prints_message(capsys):
+    launcher = load_launcher()
+    with pytest.raises(SystemExit) as exc_info:
+        launcher.check_dependencies(modules=("nonexistent_package_foo_bar_xyz",))
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "Dependencies missing — run 'pip install -r requirements.txt' or use the project venv:" in captured.err
+    assert "start_project.py" in captured.err
+
+
+def test_launcher_reexec_triggers_when_not_in_venv(monkeypatch):
+    launcher = load_launcher()
+    fake_venv_python = launcher.ROOT / "venv" / "Scripts" / "python.exe"
+    monkeypatch.setattr(launcher, "is_running_in_project_venv", lambda: False)
+    monkeypatch.setattr(launcher, "get_venv_python", lambda: fake_venv_python)
+    monkeypatch.setenv("VALIGUARD_REEXEC", "0")
+
+    called_cmd = []
+    called_env = {}
+
+    if os.name == "nt":
+        def fake_call(cmd, env=None):
+            called_cmd.extend(cmd)
+            called_env.update(env or {})
+            return 0
+        monkeypatch.setattr(launcher.subprocess, "call", fake_call)
+    else:
+        def fake_execve(path, cmd, env):
+            called_cmd.extend(cmd)
+            called_env.update(env)
+            raise SystemExit(0)
+        monkeypatch.setattr(launcher.os, "execve", fake_execve)
+
+    with pytest.raises(SystemExit):
+        launcher.maybe_reexec_into_venv()
+
+    assert str(fake_venv_python) in called_cmd[0]
+    assert "start_project.py" in called_cmd[1]
+    assert called_env.get("VALIGUARD_REEXEC") == "1"
+
+
+def test_launcher_reexec_skipped_when_already_in_venv(monkeypatch):
+    launcher = load_launcher()
+    monkeypatch.setattr(launcher, "is_running_in_project_venv", lambda: True)
+    monkeypatch.setattr(launcher.subprocess, "call", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not call subprocess")))
+    monkeypatch.setenv("VALIGUARD_REEXEC", "0")
+    # Should return silently without attempting re-exec
+    launcher.maybe_reexec_into_venv()
+
+
+def test_launcher_reexec_skipped_when_guard_set(monkeypatch):
+    launcher = load_launcher()
+    monkeypatch.setattr(launcher, "is_running_in_project_venv", lambda: False)
+    monkeypatch.setattr(launcher.subprocess, "call", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not call subprocess")))
+    monkeypatch.setenv("VALIGUARD_REEXEC", "1")
+    # Should return silently without attempting re-exec
+    launcher.maybe_reexec_into_venv()
+
