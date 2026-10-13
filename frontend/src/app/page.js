@@ -19,7 +19,8 @@ import {
     Search,
     RefreshCw,
     X,
-    Lock
+    Lock,
+    Wallet
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -83,9 +84,7 @@ export default function Dashboard() {
     const [selectedNews, setSelectedNews] = useState(null);
 
     // Feature Toggle: REAL is the default. MOCK survives ONLY behind NEXT_PUBLIC_DEMO_MODE=true.
-    const [dataSource, setDataSource] = useState(
-        isDemoModeEnabled ? 'MOCK' : 'REAL'
-    );
+    const [dataSource, setDataSource] = useState('REAL');
     const [walletAddress, setWalletAddress] = useState(null);
     const [backendStatus, setBackendStatus] = useState('unknown'); // 'online', 'offline', 'unknown'
 
@@ -323,10 +322,84 @@ export default function Dashboard() {
                 validationRate: 98.5,
                 modelAccuracy: 94.2
             });
+            setDailyStats({
+                total_transactions: 1420,
+                validation_success_rate: 98.5,
+                avg_anomaly_score: 18.4,
+                critical_alerts: 0,
+                high_alerts: 1,
+                severity_counts: { low: 950, medium: 340, high: 120, critical: 10 }
+            });
+            setVolumeHistory([
+                { date: '10-06', fullDate: '2026-10-06', count: 180 },
+                { date: '10-07', fullDate: '2026-10-07', count: 210 },
+                { date: '10-08', fullDate: '2026-10-08', count: 195 },
+                { date: '10-09', fullDate: '2026-10-09', count: 240 },
+                { date: '10-10', fullDate: '2026-10-10', count: 220 },
+                { date: '10-11', fullDate: '2026-10-11', count: 265 },
+                { date: '10-12', fullDate: '2026-10-12', count: 310 }
+            ]);
+            setValidatorStats({
+                total_validators: 4,
+                active_validators: 4,
+                avg_uptime: 99.8,
+                top_validators: [
+                    { address: 'qie1valoper1...89a', voting_power: '450,000', uptime: '99.9%', status: 'Active', transactions: 520, alerts: 0 },
+                    { address: 'qie1valoper2...bc4', voting_power: '320,000', uptime: '99.8%', status: 'Active', transactions: 410, alerts: 1 },
+                    { address: 'qie1valoper3...3ef', voting_power: '280,000', uptime: '99.7%', status: 'Active', transactions: 340, alerts: 0 },
+                    { address: 'qie1valoper4...0d1', voting_power: '150,000', uptime: '99.5%', status: 'Active', transactions: 150, alerts: 0 },
+                ]
+            });
+            setTransactions(prev => prev.length > 0 ? prev : [
+                {
+                    hash: '0x3a9f1b2c...',
+                    full_hash: '0x3a9f1b2c7e8d9a0b1c2d3e4f5a6b7c8d',
+                    type: 'BridgeValidation',
+                    timestamp: new Date().toISOString(),
+                    from: 'qie1a48c9...',
+                    amt: '125.50 QIE',
+                    severity: 'low',
+                    status: 'confirmed'
+                },
+                {
+                    hash: '0x8b4c2e1f...',
+                    full_hash: '0x8b4c2e1f9a0b1c2d3e4f5a6b7c8d9e0f',
+                    type: 'BridgeValidation',
+                    timestamp: new Date(Date.now() - 4000).toISOString(),
+                    from: 'qie17ef02...',
+                    amt: '1,420.00 QIE',
+                    severity: 'high',
+                    status: 'confirmed'
+                },
+                {
+                    hash: '0x1c2d3e4f...',
+                    full_hash: '0x1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f',
+                    type: 'BridgeValidation',
+                    timestamp: new Date(Date.now() - 9000).toISOString(),
+                    from: 'qie1bc814...',
+                    amt: '45.00 QIE',
+                    severity: 'low',
+                    status: 'confirmed'
+                }
+            ]);
             let tick = 0;
             interval = setInterval(() => {
                 tick += 1;
                 setNodeStatus(prev => ({ ...prev, height: (prev.height || 1245000) + 1 }));
+                const mockTypes = ['low', 'low', 'medium', 'high'];
+                const mockSev = mockTypes[Math.floor(Math.random() * mockTypes.length)];
+                const randomHex = Math.random().toString(16).substring(2, 10);
+                const newTx = {
+                    hash: `0x${randomHex}...`,
+                    full_hash: `0x${randomHex}${Math.random().toString(16).substring(2, 24)}`,
+                    type: 'BridgeValidation',
+                    timestamp: new Date().toISOString(),
+                    from: `qie1${Math.random().toString(36).substring(2, 7)}...`,
+                    amt: `${(Math.random() * 450 + 10).toFixed(2)} QIE`,
+                    severity: mockSev,
+                    status: 'confirmed'
+                };
+                setTransactions(prev => [newTx, ...prev.slice(0, 14)]);
             }, 3000);
         } else {
             // REAL Mode: always fetch open node status
@@ -421,7 +494,9 @@ export default function Dashboard() {
     }, [dataSource]);
 
     // Honest Derived Metrics
-    const isAuthed = typeof window !== 'undefined' && (!!walletAddress || isAuthenticated());
+    // In MOCK mode, telemetry is fully demonstrated for simulation.
+    // In REAL mode, historical analytics endpoints require UC-01 wallet authentication.
+    const isAuthed = dataSource === 'MOCK' || (typeof window !== 'undefined' && (!!walletAddress || isAuthenticated()));
     const totalTransactions24h = dailyStats?.total_transactions ?? null;
     const derivedTps = (typeof totalTransactions24h === 'number' && totalTransactions24h > 0)
         ? (totalTransactions24h / 86400).toFixed(4)
@@ -647,6 +722,14 @@ export default function Dashboard() {
                                                         <Lock className="w-8 h-8 mb-2 text-slate-500" />
                                                         <p className="text-sm font-medium text-slate-300">Connect wallet to view telemetry</p>
                                                         <p className="text-xs text-slate-500 mt-1">Historical analytics endpoints require wallet authentication.</p>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => document.getElementById('wallet-connect-button')?.click()}
+                                                            className="mt-3 px-3 py-1.5 bg-gradient-to-r from-blue-600 to-purple-600 hover:opacity-90 text-white rounded-lg text-xs font-semibold shadow transition-all flex items-center gap-1.5 cursor-pointer"
+                                                        >
+                                                            <Wallet className="w-3.5 h-3.5" />
+                                                            Connect Wallet
+                                                        </button>
                                                     </div>
                                                 ) : !hasTrafficVolume ? (
                                                     <div className="h-full flex flex-col items-center justify-center text-slate-500 text-center p-4">
@@ -706,6 +789,14 @@ export default function Dashboard() {
                                                     <div className="h-full flex flex-col items-center justify-center text-slate-400 text-center p-4">
                                                         <Lock className="w-8 h-8 mb-2 text-slate-500" />
                                                         <p className="text-sm font-medium text-slate-300">Connect wallet to view risk distribution</p>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => document.getElementById('wallet-connect-button')?.click()}
+                                                            className="mt-3 px-3 py-1.5 bg-gradient-to-r from-blue-600 to-purple-600 hover:opacity-90 text-white rounded-lg text-xs font-semibold shadow transition-all flex items-center gap-1.5 cursor-pointer"
+                                                        >
+                                                            <Wallet className="w-3.5 h-3.5" />
+                                                            Connect Wallet
+                                                        </button>
                                                     </div>
                                                 ) : totalSeverityDetections === 0 ? (
                                                     <div className="h-full flex flex-col items-center justify-center text-slate-500 text-center p-4">
@@ -828,6 +919,14 @@ export default function Dashboard() {
                                             <Lock className="w-10 h-10 mb-3 text-slate-500" />
                                             <h4 className="text-lg font-bold text-white">Connect Wallet to View Validators</h4>
                                             <p className="text-sm text-slate-400 mt-1 max-w-md">Validator stake distribution, voting power, and RPC telemetry require authentication.</p>
+                                            <button
+                                                type="button"
+                                                onClick={() => document.getElementById('wallet-connect-button')?.click()}
+                                                className="mt-4 px-4 py-2 bg-gradient-to-r from-blue-600 to-purple-600 hover:opacity-90 text-white rounded-lg text-sm font-semibold shadow transition-all flex items-center gap-2 cursor-pointer"
+                                            >
+                                                <Wallet className="w-4 h-4" />
+                                                Connect Wallet
+                                            </button>
                                         </div>
                                     ) : (!validatorStats.top_validators || validatorStats.top_validators.length === 0) ? (
                                         <div className="bg-slate-800 p-12 rounded-2xl border border-slate-700 text-center text-slate-400">
@@ -899,8 +998,11 @@ export default function Dashboard() {
                                     exit={{ opacity: 0, y: -20 }}
                                     className="space-y-6"
                                 >
-                                    <h2 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-400">
-                                        QIE Ecosystem Updates 📰
+                                    <h2 className="text-2xl font-bold flex items-center gap-2">
+                                        <span className="bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-400">
+                                            QIE Ecosystem Updates
+                                        </span>
+                                        <span className="text-2xl">📰</span>
                                     </h2>
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                         {[
@@ -1062,6 +1164,14 @@ export default function Dashboard() {
                                             <Lock className="w-8 h-8 mb-2 text-slate-500" />
                                             <p className="text-sm font-medium text-slate-300">Connect wallet to search and audit alert history</p>
                                             <p className="text-xs text-slate-500 mt-1">Live WebSocket alerts remain visible above; persisted database search requires authentication.</p>
+                                            <button
+                                                type="button"
+                                                onClick={() => document.getElementById('wallet-connect-button')?.click()}
+                                                className="mt-3 px-3 py-1.5 bg-gradient-to-r from-blue-600 to-purple-600 hover:opacity-90 text-white rounded-lg text-xs font-semibold shadow transition-all flex items-center gap-1.5 cursor-pointer"
+                                            >
+                                                <Wallet className="w-3.5 h-3.5" />
+                                                Connect Wallet
+                                            </button>
                                         </div>
                                     ) : alertsLoading ? (
                                         <div className="p-8 text-center text-slate-400">Loading alerts from database...</div>
@@ -1194,6 +1304,14 @@ export default function Dashboard() {
                                                 <div className="h-full flex flex-col items-center justify-center text-slate-400 text-center p-4">
                                                     <Lock className="w-8 h-8 mb-2 text-slate-500" />
                                                     <p className="text-sm font-medium text-slate-300">Connect wallet to view network traffic telemetry</p>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => document.getElementById('wallet-connect-button')?.click()}
+                                                        className="mt-3 px-3 py-1.5 bg-gradient-to-r from-blue-600 to-purple-600 hover:opacity-90 text-white rounded-lg text-xs font-semibold shadow transition-all flex items-center gap-1.5 cursor-pointer"
+                                                    >
+                                                        <Wallet className="w-3.5 h-3.5" />
+                                                        Connect Wallet
+                                                    </button>
                                                 </div>
                                             ) : !hasTrafficVolume ? (
                                                 <div className="h-full flex flex-col items-center justify-center text-slate-500 text-center p-4">
