@@ -1225,16 +1225,26 @@ def _fetch_node_telemetry() -> Dict[str, Any]:
     return data
 
 
+_voting_power_cache: Dict[str, Any] = {"data": {}, "fetched_at": 0.0}
+
+
 def _fetch_chain_voting_power() -> Dict[str, float]:
-    """Return chain-reported voting power as percentages keyed by address."""
+    """Return chain-reported voting power as percentages keyed by address (cached for 30s)."""
+    now = time.time()
+    if (
+        _voting_power_cache["data"]
+        and now - _voting_power_cache["fetched_at"] < NODE_TELEMETRY_TTL_SECONDS
+    ):
+        return _voting_power_cache["data"]
+
     try:
         result = qie_manager.get_validator_set()
     except Exception as exc:  # noqa: BLE001 — DB fallback must remain available
         logger.debug("Validator-set RPC failed: %s", exc)
-        return {}
+        return _voting_power_cache["data"] or {}
 
     if not result.get("success"):
-        return {}
+        return _voting_power_cache["data"] or {}
 
     raw_values = {}
     for validator in result.get("validators", []):
@@ -1253,11 +1263,15 @@ def _fetch_chain_voting_power() -> Dict[str, float]:
 
     total_power = sum(raw_values.values())
     if total_power <= 0:
-        return {}
-    return {
+        return _voting_power_cache["data"] or {}
+
+    data = {
         address: round(power / total_power * 100, 2)
         for address, power in raw_values.items()
     }
+    _voting_power_cache["data"] = data
+    _voting_power_cache["fetched_at"] = now
+    return data
 
 
 @app.route("/api/v1/analytics/validator-stats", methods=["GET"])

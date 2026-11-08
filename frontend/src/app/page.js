@@ -166,8 +166,8 @@ export default function Dashboard() {
 
     // Open endpoint node status fetch (public, no auth needed)
     const fetchPublicNodeStatus = useCallback(async () => {
+        const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
         try {
-            const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
             const statusRes = await fetch(`${API_BASE}/api/v1/qie/node/status`);
             if (statusRes.ok) {
                 const statusData = await statusRes.json();
@@ -180,11 +180,22 @@ export default function Dashboard() {
                     }));
                 }
             } else {
-                setBackendStatus('offline');
+                // Check lightweight /health endpoint before declaring entire backend offline
+                const healthRes = await fetch(`${API_BASE}/health`).catch(() => null);
+                if (healthRes && healthRes.ok) {
+                    setBackendStatus('online');
+                } else {
+                    setBackendStatus('offline');
+                }
             }
         } catch (error) {
-            console.warn("Public node status unavailable:", error);
-            setBackendStatus('offline');
+            const healthRes = await fetch(`${API_BASE}/health`).catch(() => null);
+            if (healthRes && healthRes.ok) {
+                setBackendStatus('online');
+            } else {
+                console.warn("Backend API unreachable:", error);
+                setBackendStatus('offline');
+            }
         }
     }, []);
 
@@ -200,7 +211,7 @@ export default function Dashboard() {
             const statsRes = await authedFetch('/api/v1/analytics/daily-stats');
             if (statsRes.ok) {
                 const statsData = await statsRes.json();
-                if (statsData.success) {
+                if (statsData.success && statsData.data) {
                     setDailyStats(statsData.data);
                     if (Array.isArray(statsData.data.bridge_routes)) {
                         setBridgeRoutes(statsData.data.bridge_routes);
@@ -218,7 +229,7 @@ export default function Dashboard() {
             const modelRes = await authedFetch('/api/v1/analytics/model-accuracy');
             if (modelRes.ok) {
                 const modelData = await modelRes.json();
-                if (modelData.success) {
+                if (modelData.success && modelData.data) {
                     const rawAcc = modelData.data.accuracy;
                     const normalizedAcc = rawAcc == null
                         ? null
@@ -234,7 +245,7 @@ export default function Dashboard() {
             const valRes = await authedFetch('/api/v1/analytics/validator-stats');
             if (valRes.ok) {
                 const valData = await valRes.json();
-                if (valData.success) {
+                if (valData.success && valData.data) {
                     setValidatorStats(valData.data);
                     if (Array.isArray(valData.data.bridge_routes) && valData.data.bridge_routes.length > 0) {
                         setBridgeRoutes(valData.data.bridge_routes);
@@ -250,7 +261,7 @@ export default function Dashboard() {
             const histRes = await authedFetch('/api/v1/bridge/history?limit=15');
             if (histRes.ok) {
                 const histData = await histRes.json();
-                if (histData.success && Array.isArray(histData.data.transactions)) {
+                if (histData.success && Array.isArray(histData.data?.transactions)) {
                     const mappedTxs = histData.data.transactions.map(tx => {
                         const txHash = tx.tx_hash || tx.transaction_hash || '';
                         const value = tx.value ?? tx.amount;
@@ -297,7 +308,7 @@ export default function Dashboard() {
 
         } catch (error) {
             console.error("Protected telemetry fetch error:", error);
-            setBackendStatus('offline');
+            // Telemetry aggregation warning does not mark the entire backend API as offline
         }
     }, [walletAddress]);
 

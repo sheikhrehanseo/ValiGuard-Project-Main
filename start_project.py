@@ -269,8 +269,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             webbrowser.open(FRONTEND_URL)
         while True:
             time.sleep(1)
-            if any(process.poll() is not None for process in processes):
-                raise RuntimeError("A child process exited unexpectedly")
+            for i, process in enumerate(processes):
+                exit_code = process.poll()
+                if exit_code is not None:
+                    label = "backend API" if i == 0 else ("frontend (Next.js)" if i == 1 else "traffic simulator")
+                    raise RuntimeError(f"{label} exited unexpectedly with code {exit_code}")
     except KeyboardInterrupt:
         print("\nStopping ValiGuard...")
         return 0
