@@ -35,3 +35,5 @@ VALIDATOR_SETUP_GUIDE.md
 
 # Ignore plans folder
 .zcode/
+.vscode/
+exports/

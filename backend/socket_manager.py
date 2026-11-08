@@ -52,6 +52,8 @@ class SocketManager:
             severity = severity_from_score(anomaly_score) if anomaly_score is not None else "low"
 
         return {
+            "id": transaction.get("transaction_id", transaction.get("id")),
+            "alert_id": transaction.get("alert_id"),
             "tx_hash": transaction.get("tx_hash"),
             "value": transaction.get("value"),
             "sender": transaction.get("sender"),
@@ -84,11 +86,14 @@ class SocketManager:
         score = transaction["anomaly_score"]
         score_display = f"{float(score):.1f}" if score is not None else "unavailable"
         return {
+            "id": transaction.get("alert_id"),
+            "alert_id": transaction.get("alert_id"),
             "tx_hash": transaction["tx_hash"],
             "severity": transaction["severity"],
             "anomaly_score": score,
             "risk_score": transaction["risk_score"],
             "reason": transaction["reason"],
             "message": f"Anomaly score {score_display} on {transaction['tx_hash']}",
+            "is_resolved": False,
             "timestamp": transaction["timestamp"],
         }

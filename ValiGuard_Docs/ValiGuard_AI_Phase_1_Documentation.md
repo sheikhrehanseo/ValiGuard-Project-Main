@@ -13,7 +13,7 @@ Lahore, Pakistan
 ---
 
 ## Abstract
-Cross-chain bridges suffered over $2.5 billion in exploits in 2022 due to the "semantic blindness" of blockchain validators, who verify cryptographic signatures but cannot assess the contextual risk of transactions. To close this vulnerability, we developed the system that leverages Python-driven orchestration, a Flask API, and an unsupervised Isolation Forest machine learning pipeline to analyze real-time transaction data via Tendermint RPC. By evaluating volume, frequency, and temporal patterns, it computes dynamic risk scores to flag anomalous behavior before final settlement occurs.
+Cross-chain bridges suffered over $2.5 billion in exploits in 2022 due to the "semantic blindness" of blockchain validators, who verify cryptographic signatures but cannot assess the contextual risk of transactions. To close this vulnerability, we developed the system that leverages Python-driven orchestration, a Flask API, and an unsupervised Isolation Forest machine learning pipeline to analyze real-time pending (mempool) and confirmed (block) transaction data via Tendermint RPC and standard EVM JSON-RPC interfaces. By evaluating volume, frequency, and temporal patterns, it computes dynamic risk scores to flag anomalous behavior before final settlement occurs.
 
 The implementation provides a unified Next.js dashboard that delivers real-time operational telemetry and categorizes threats by severity with incredibly low latency. Furthermore, the platform's modular AI core allows for seamless future upgrades, such as implementing Graph Neural Networks, without requiring structural refactoring. Ultimately, ValiGuard AI transforms validators from passive infrastructure providers into active security guardians, shifting the industry's defense paradigm from post-incident forensics to real-time anomaly interception.
 
@@ -32,12 +32,12 @@ The project utilizes Python, Flask, Next.js, React, Scikit-learn, NumPy, SQLAlch
 ### 1.1 Introduction
 The advent of Web3 and decentralized finance (DeFi) has catalyzed a paradigm shift from isolated, single-chain ecosystems to an interconnected, multi-chain landscape. At the core of this interoperability are cross-chain bridges: protocols that facilitate the transfer of assets and data across disparate blockchain networks. While these bridges are fundamental to the scalability and utility of the decentralized web, they have simultaneously emerged as the most critical vector for systemic vulnerability.
 
-In 2022 alone, cross-chain bridge exploits accounted for approximately 2.5 billion dollat in lost assets, representing 70% of all crypto-related thefts that year. High-profile catastrophes, such as the Ronin Network (625M) and Wormhole (325M) breaches, underscore a fundamental flaw in the current security architecture. While the underlying cryptographic primitives of blockchains remain robust, the operational logic and validation mechanisms governing cross-chain state transitions are highly susceptible to manipulation.
+In 2022 alone, cross-chain bridge exploits accounted for approximately $2.5 billion in lost assets, representing 70% of all crypto-related thefts that year. High-profile catastrophes, such as the Ronin Network ($625M) and Wormhole ($325M) breaches, underscore a fundamental flaw in the current security architecture. While the underlying cryptographic primitives of blockchains remain robust, the operational logic and validation mechanisms governing cross-chain state transitions are highly susceptible to manipulation.
 
 Historically, network security has relied on reactive measures, such as post-hoc audits, bug bounties, and forensic investigations, that address vulnerabilities only after capital has been exfiltrated. The current paradigm places blockchain validators in a position of "semantic blindness." Validators mathematically verify the legitimacy of cryptographic signatures, but possess no operational visibility into the intent or context of the transactions they are ratifying. Consequently, by the time a bridge exploit is reflected on-chain, the malicious transaction has already achieved finality. There exists a critical research and engineering gap for proactive, real-time threat detection mechanisms that operate at the validator layer before final settlement is achieved.
 
 ### 1.2 Purpose
-The primary purpose of this research is to transition blockchain validators from passive infrastructure providers to active security guardians. Currently, the validation process is strictly syntactic, devoid of contextual risk assessment. The purpose of ValiGuard Al is to inject semantic visibility into the validation lifecycle.
+The primary purpose of this research is to transition blockchain validators from passive infrastructure providers to active security guardians. Currently, the validation process is strictly syntactic, devoid of contextual risk assessment. The purpose of ValiGuard AI is to inject semantic visibility into the validation lifecycle.
 
 By equipping validator nodes with an intelligent monitoring layer, this research aims to detect anomalous cross-chain behavior in real-time. This includes sudden liquidity drains, abnormal volume spikes, or interactions with flagged wallet clusters. The ultimate purpose is to provide an early-warning system that identifies zero-day exploits and attack vectors as they manifest in the mempool or early block propagation, thereby preventing irreversible financial damage before consensus is finalized. Additionally, this research aims to democratize validator security by automating the complex orchestration of node setup. This ensures that robust security infrastructure is accessible not just to institutional operators, but to independent validators across the QIE Blockchain network.
 
@@ -52,30 +52,30 @@ To fulfill the identified purpose, this research proposes the following specific
 A review of the current landscape reveals several platforms attempting to address blockchain security; however, significant limitations remain concerning validator-centric, real-time anomaly detection.
 1.  **Forta Network:** Forta operates as a decentralized monitoring network where developers deploy specific detection "bots" to scan for predefined attack patterns.
     *   **Limitation:** Forta relies heavily on signature-based detection for known vulnerabilities and requires manual bot development. It struggles to detect novel, zero-day anomalies via unsupervised learning and is not natively integrated into the validator's operational workflow.
-2.  **Hypernative:** Hypernative utilizes predictive Al to monitor off-chain and on-chain data, aiming to preemptively block exploits.
+2.  **Hypernative:** Hypernative utilizes predictive AI to monitor off-chain and on-chain data, aiming to preemptively block exploits.
     *   **Limitation:** While highly effective, Hypernative operates as a proprietary, closed-source SaaS platform. It creates vendor lock-in and is not natively tailored to the specific architectural nuances of the QIE Blockchain validator ecosystem.
 3.  **Tenderly:** Tenderly is a comprehensive Web3 development platform offering real-time alerting, transaction simulation, and forensic analysis.
     *   **Limitation:** Tenderly is fundamentally developer-centric, focused on smart contract debugging and simulation rather than providing a real-time, ML-driven risk-scoring feed tailored for the operational decision-making of a network validator.
 
-**Identified Research Gap:** Current solutions are either purely reactive, require explicit rule-setting for known attacks, or operate as closed external SaaS platforms disconnected from the validator's immediate operational environment. There is no open, natively integrated solution that combines automated validator infrastructure orchestration with an unsupervised, real-time Al anomaly detection layer specifically designed for cross-chain bridge traffic.
+**Identified Research Gap:** Current solutions are either purely reactive, require explicit rule-setting for known attacks, or operate as closed external SaaS platforms disconnected from the validator's immediate operational environment. There is no open, natively integrated solution that combines automated validator infrastructure orchestration with an unsupervised, real-time AI anomaly detection layer specifically designed for cross-chain bridge traffic.
 
 ### 1.5 Proposed Solution
 To address the limitations identified in the existing literature and commercial landscape, this research proposes ValiGuard AI, an intelligent security dashboard and orchestration engine designed natively for the QIE Blockchain ecosystem.
 
 ValiGuard AI introduces a novel, multi-layered architecture that fuses infrastructure automation with proactive threat intelligence:
-1.  **Blockchain Source and Ingestion Layer:** A direct integration with the QIE Mainnet via Tendermint RPC interfaces allows the system to ingest raw block data and monitor the mempool for pending transactions before they are committed to a block.
-2.  **Al Intelligence Core:** Moving beyond rigid, signature-based rules, the core of ValiGuard Al employs unsupervised machine learning. By establishing historical baselines for bridge traffic, the system computes dynamic Risk Scores based on multivariate deviations (e.g., a 10x volume spike at an anomalous time of day), enabling the detection of previously unseen attack vectors.
+1.  **Blockchain Source and Ingestion Layer:** A direct dual-interface integration with the QIE Mainnet via both Tendermint RPC (`:26657`) and standard EVM JSON-RPC (`:8545`) interfaces allows the system to continuously monitor the mempool (`unconfirmed_txs` / `pending` filter) for pending transactions before block finality and ingest confirmed block transactions, decoding and normalizing them into a unified cross-chain schema.
+2.  **AI Intelligence Core:** Moving beyond rigid, signature-based rules, the core of ValiGuard AI employs unsupervised machine learning. By establishing historical baselines for bridge traffic, the system computes dynamic Risk Scores based on multivariate deviations (e.g., a 10x volume spike at an anomalous time of day), enabling the detection of previously unseen attack vectors.
 3.  **Orchestration and API Gateway:** To eliminate the barrier to entry for running secure infrastructure, the system features a Python/Flask backend coupled with automated orchestration scripts that handle the end-to-end lifecycle of a QIE validator node, from binary installation to genesis configuration.
 4.  **Validator Dashboard Layer:** A high-performance, responsive Next.js frontend provides a single-pane-of-glass visualization. It streams real-time security alerts alongside operational metrics (sync status, voting power), utilizing WebSocket technology to ensure sub-100ms data propagation latency.
 
-By integrating these components, ValiGuard Al shifts the security paradigm from post-incident forensics to proactive, real-time interception, fulfilling the critical need for semantic visibility in cross-chain bridge validation.
+By integrating these components, ValiGuard AI shifts the security paradigm from post-incident forensics to proactive, real-time interception, fulfilling the critical need for semantic visibility in cross-chain bridge validation.
 
 ---
 
 ## Chapter 2: Software Requirement Specification
 
 ### 2.1 Introduction
-This Software Requirement Specification (SRS) document provides a detailed description of the functional, non-functional, and interface requirements for the ValiGuard Al system. It serves as the foundational blueprint for the design, development, and testing phases of the project. By formally defining the expected system behavior and constraints, this document ensures a unified understanding among the development team, academic supervisors, and evaluating committees regarding the scope and capabilities of the proposed solution.
+This Software Requirement Specification (SRS) document provides a detailed description of the functional, non-functional, and interface requirements for the ValiGuard AI system. It serves as the foundational blueprint for the design, development, and testing phases of the project. By formally defining the expected system behavior and constraints, this document ensures a unified understanding among the development team, academic supervisors, and evaluating committees regarding the scope and capabilities of the proposed solution.
 
 #### 2.1.1 Purpose
 The primary purpose of this SRS is to delineate the precise technical and operational requirements necessary to transition blockchain validators from passive infrastructure providers to active security guardians. It aims to formalize the software requirements needed to address the identified research gap: the lack of real-time, semantically aware anomaly detection at the validator layer.
@@ -93,17 +93,17 @@ ValiGuard AI is an intelligent security monitoring and orchestration platform de
 **In-Scope Functionalities:**
 The following capabilities fall within the boundaries of this project and will be implemented and tested:
 1.  **Automated Node Orchestration:** Development of Python-driven automation scripts that handle the end-to-end lifecycle of a QIE validator node, including binary installation, configuration, and genesis synchronization.
-2.  **Real-Time Transaction Ingestion:** Integration with the QIE Mainnet via Tendermint RPC to continuously ingest pending and confirmed cross-chain bridge transactions.
+2.  **Real-Time Transaction Ingestion:** Dual-interface integration with the QIE Mainnet via Tendermint RPC (`unconfirmed_txs` and `block`) and standard EVM JSON-RPC (`eth_getBlockByNumber` for `pending` and `latest` blocks, `txpool_content`) to continuously capture, decode, and normalize pending mempool and confirmed cross-chain bridge transactions.
 3.  **Unsupervised Anomaly Detection:** Implementation of a machine learning pipeline utilizing algorithms such as Isolation Forest to compute dynamic risk scores (0-100) based on deviations in transaction volume, frequency, and temporal patterns.
-4.  **Alerting and Risk Categorization:** Generation of automated, color-coded alerts (Critical, High, Medium, Low) when computed risk scores breach predefined operational thresholds.
+4.  **Alerting and Risk Categorization:** Evaluation of transactions across four risk levels (Critical, High, Medium, Low) and automatic generation of color-coded security alerts across three distinct alerting severity tiers (Critical, High, or Medium) when computed risk scores breach predefined security thresholds (score >= 40).
 5.  **Unified Validator Dashboard:** Development of a responsive, web-based Next.js interface that aggregates operational metrics (node sync status, voting power) with security telemetry (live risk feeds, historical anomaly charts).
 6.  **Persistent Data Storage:** Implementation of a relational database schema (SQLAlchemy/PostgreSQL) to log transactions, anomaly detections, and system alerts for historical auditing and model retraining.
 
 **Out-of-Scope Functionalities:**
 To maintain a focused research trajectory, the following capabilities are explicitly excluded from the current project scope:
 1.  **Autonomous Remediation:** The system will detect and flag anomalous transactions, but it will not autonomously halt, revert, or censor transactions on the blockchain. The final decision to act on an alert remains with the human validator operator.
-2.  **Multi-Chain Architecture Support:** The initial implementation is tailored specifically to the QIE Network V3 and its Tendermint-based RPC structure. Adapting the ingestion layer for EVM-compatible chains (e.g., Ethereum, BSC) is reserved for future extensibility.
-3.  **Smart Contract Auditing:** ValiGuard Al focuses on runtime anomaly detection at the transaction and network layer. Static analysis or formal verification of smart contract code is outside the scope of this research.
+2.  **Non-EVM / External Consensus Node Orchestration:** While ValiGuard AI is fully compatible with QIE Network V3, standard Tendermint RPC interfaces, and standard EVM RPC/Web3 interfaces (including cross-chain bridge telemetry across Ethereum, Polygon, and BSC, as well as EIP-191 Web3 wallet authentication), automating full validator node binary deployment for non-QIE consensus engines is reserved for future extensibility.
+3.  **Smart Contract Auditing:** ValiGuard AI focuses on runtime anomaly detection at the transaction and network layer. Static analysis or formal verification of smart contract code is outside the scope of this research.
 4.  **Mobile Native Applications:** The unified dashboard will be designed as a responsive web application. Developing dedicated native mobile applications (iOS/Android) is not included in this phase.
 
 #### 2.1.3 Definitions, Acronyms, and Abbreviations
@@ -112,7 +112,7 @@ To maintain a focused research trajectory, the following capabilities are explic
 
 | Acronym/Abbreviation | Definition |
 | :--- | :--- |
-| **AL** | Artificial Intelligence. |
+| **AI** | Artificial Intelligence. |
 | **API** | Application Programming Interface. |
 | **Aqie** | Atto-QIE. The smallest denomination of the QIE token (10^18 aqie = 1 QIE), used in the database and transaction logic. |
 | **CLI** | Command Line Interface. |
@@ -123,7 +123,7 @@ To maintain a focused research trajectory, the following capabilities are explic
 | **JWT** | JSON Web Token. |
 | **ML** | Machine Learning. |
 | **ORM** | Object-Relational Mapping. |
-| **RPC** | Remote Procedure Call. The protocol (specifically Tendermint RPC) used by the system to request data from the QIE Blockchain node. |
+| **RPC** | Remote Procedure Call. The protocols (both Tendermint RPC on port 26657 and standard EVM JSON-RPC on port 8545) used by the system to stream mempool and confirmed block data from the QIE Blockchain node. |
 | **SPA** | Single Page Application. The web application architecture used for the Next.js frontend dashboard. |
 | **TVL** | Total Value Locked. The total amount of assets currently deposited or staked in a cross-chain bridge protocol. |
 | **TPS** | Transactions Per Second. |
@@ -151,24 +151,24 @@ To maintain a focused research trajectory, the following capabilities are explic
 | **Validator** | An entity in a Proof-of-Stake blockchain network responsible for creating new blocks and voting on the validity of transactions. |
 
 ### 2.2 Overall Description
-This section provides a high-level perspective of the ValiGuard Al system, outlining the operational context, core functional categories, user demographics, system constraints, and the strategic apportioning of requirements across development phases.
+This section provides a high-level perspective of the ValiGuard AI system, outlining the operational context, core functional categories, user demographics, system constraints, and the strategic apportioning of requirements across development phases.
 
 #### 2.2.1 Product Perspective
-ValiGuard Al is a self-contained, multi-layered software platform that operates as an intelligent intermediary between the QIE Blockchain network and the human validator operator. It is not a standalone smart contract; rather, it is an off-chain monitoring and orchestration system that interfaces with the blockchain via Remote Procedure Calls (RPC).
+ValiGuard AI is a self-contained, multi-layered software platform that operates as an intelligent intermediary between the QIE Blockchain network and the human validator operator. It is not a standalone smart contract; rather, it is an off-chain monitoring and orchestration system that interfaces with the blockchain via Remote Procedure Calls (RPC).
 
 The system follows a client-server architecture:
-*   **Backend Engine:** A Python/Flask application responsible for data ingestion, machine learning inference, API routing, and database management. It communicates directly with the QIE Network V3 client (qied) via Tendermint RPC.
+*   **Backend Engine:** A Python/Flask application responsible for data ingestion, cross-chain transaction decoding/normalization, machine learning inference, API routing, and database management. It communicates directly with the QIE Network V3 client (`qied`) via both Tendermint RPC and standard EVM JSON-RPC interfaces.
 *   **Frontend Dashboard:** A Next.js single-page application (SPA) that consumes the backend API and renders real-time telemetry, risk scores, and operational metrics.
 *   **Automation Layer:** A suite of Python and Bash orchestration scripts that manage the validator node lifecycle independently of the primary web application.
 
 The system relies on a relational database (SQLAlchemy with PostgreSQL for production) for persistent storage of transactions, anomaly logs, and validator states.
 
 #### 2.2.2 Product Functions
-The major functional categories of ValiGuard Al are summarized as follows:
+The major functional categories of ValiGuard AI are summarized as follows:
 1.  **Node Orchestration and Management:** The system automates the deployment and configuration of QIE validator nodes. This includes downloading the binary, initializing the genesis configuration, and monitoring synchronization status.
 2.  **Real-Time Data Ingestion:** The backend continuously polls the QIE Mainnet RPC to ingest pending and confirmed cross-chain bridge transactions, normalizing the data into a unified schema.
-3.  **Anomaly Detection and Risk Scoring:** The Al Intelligence Core utilizes unsupervised machine learning algorithms to evaluate ingested transactions against historical baselines. It computes a dynamic risk score (0-100) based on features such as transaction volume, frequency, and temporal deviations.
-4.  **Alert Generation:** When a computed risk score breaches predefined operational thresholds, the system generates structured security alerts categorized by severity (Critical, High, Medium, Low).
+3.  **Anomaly Detection and Risk Scoring:** The AI Intelligence Core utilizes unsupervised machine learning algorithms to evaluate ingested transactions against historical baselines. It computes a dynamic risk score (0-100) based on features such as transaction volume, frequency, and temporal deviations.
+4.  **Alert Generation:** When a computed risk score breaches predefined security thresholds (score >= 40), the system generates structured security alerts classified into three distinct alerting severity tiers (Critical, High, or Medium), while logging Low-risk transactions (score < 40) as normal baseline traffic.
 5.  **Security Visualization:** The Next.js dashboard provides a unified interface displaying node health metrics, live transaction feeds with color-coded risk indicators, and interactive analytics charts visualizing bridge traffic and anomaly distributions.
 
 #### 2.2.3 User Characteristics
@@ -181,11 +181,11 @@ The intended users of ValiGuard AI possess the following characteristics:
 The development and operation of ValiGuard AI are subject to the following constraints:
 1.  **Hardware Constraints:** The system must operate alongside a resource-intensive QIE validator node (qied). The host machine must possess sufficient CPU, RAM (minimum 8GB recommended), and storage (minimum 100GB SSD) to support both the node and the ML inference engine concurrently.
 2.  **Network Constraints:** Continuous, low-latency internet connectivity is mandatory. Anomaly detection relies on real-time mempool data; network interruptions will create blind spots in security monitoring.
-3.  **Software Constraints:** The system is tightly coupled with the QIE Network V3 architecture and its specific Tendermint RPC interface schemas. Compatibility with other blockchain protocols is not supported in this iteration.
+3.  **Software Constraints:** The validator node orchestration layer is tailored to the QIE Network V3 client (`qied`) and its Tendermint RPC / EVM-compatible interfaces. Direct validator binary management for non-QIE consensus clients is outside the boundary of this iteration.
 4.  **Regulatory and Operational Constraints:** The system is strictly a monitoring and alerting tool. It cannot autonomously halt, censor, or modify transactions on the blockchain. Automated remediation violates the principles of decentralized consensus and is outside the operational boundary of the software.
 
 #### 2.2.5 Assumptions and Dependencies
-The successful operation of ValiGuard Al relies on the following assumptions and dependencies:
+The successful operation of ValiGuard AI relies on the following assumptions and dependencies:
 *   **Dependency on QIE RPC:** The system assumes that the QIE Mainnet RPC endpoints remain accessible and structurally consistent. Breaking changes to the Tendermint RPC API in future network upgrades will require software modifications.
 *   **Assumption of Data Availability:** The unsupervised machine learning model requires a sufficient volume of historical transaction data to establish accurate baseline patterns. During the initial deployment phase, before a robust baseline is established, the system may exhibit a higher rate of false-positive alerts.
 *   **Dependency on Third-Party Libraries:** The ML pipeline is dependent on the continued availability and stability of scikit-learn and NumPy. The frontend is dependent on the Next.js and React ecosystems.
@@ -194,38 +194,38 @@ The successful operation of ValiGuard Al relies on the following assumptions and
 #### 2.2.6 Apportioning of Requirements
 To manage development complexity and align with academic milestones, the system requirements are apportioned into two primary development phases:
 
-**Phase 1 (Current Implementation):** Focuses on establishing the core infrastructure, database architecture, API gateway, orchestration scripts, and the user interface shell.
-*   Implementation of SQLAlchemy database models and migrations.
-*   Development of the complete Node Orchestration and Setup pipeline.
-*   Deployment of the Flask API with placeholder logic for anomaly scoring.
-*   Design and implementation of the Next.js Unified Validator Dashboard with mock data integration.
+**Phase 1 (Foundational Architecture & Orchestration):** Focuses on establishing the core infrastructure, relational database architecture, API gateway, validator node orchestration scripts, and the user interface shell.
+*   Implementation of SQLAlchemy ORM database models (`Bridge`, `Transaction`, `AnomalyDetection`, `Validator`, `Alert`) and Alembic migrations.
+*   Development of the complete QIE Node Orchestration and Validator Setup pipeline (`QIESetupManager`, `QIENodeManager`, `QIEValidatorManager`).
+*   Deployment of the Flask REST API gateway with Pydantic validation and rate limiting.
+*   Design and implementation of the Next.js Unified Validator Dashboard and Web3 wallet integration.
 
-**Phase 2 (Subsequent Implementation):** Focuses on replacing placeholder logic with production-ready intelligence and real-time capabilities.
-*   Implementation and training of the Isolation Forest ML model to replace the placeholder anomaly scoring.
-*   Integration of Flask-SocketIO for WebSocket-driven, real-time transaction feeds.
-*   Development of the background worker for continuous mempool and RPC ingestion.
-*   Migration from SQLite (development) to PostgreSQL (production) for scalable data persistence.
+**Phase 2 (AI Intelligence Core & Real-Time Telemetry Integration):** Focuses on production-grade machine learning inference, real-time mempool/block ingestion, WebSocket streaming, and cryptographic authentication.
+*   Implementation and training of the unsupervised Isolation Forest ML pipeline (`FeatureExtractor` and `AnomalyModel`) for dynamic 0–100 risk scoring and contextual reasoning generation.
+*   Integration of `Flask-SocketIO` (`SocketManager`) for sub-100ms WebSocket-driven live transaction, anomaly, and alert feeds.
+*   Development of the continuous background `IngestionWorker` and multi-format transaction decoder for real-time mempool (`unconfirmed_txs`, EVM `pending` filter / `txpool_content`) and confirmed block polling via Tendermint RPC and standard EVM JSON-RPC.
+*   Implementation of EIP-191 Web3 challenge-response nonce signing and HS256 JWT session authentication, alongside dual SQLite (development) and PostgreSQL (production) persistence.
 
 ### 2.3 Specific Requirements
-This section details the precise functional and non-functional requirements of the ValiGuard Al system. Each requirement is uniquely identified to ensure traceability throughout the software development lifecycle and testing phases.
+This section details the precise functional and non-functional requirements of the ValiGuard AI system. Each requirement is uniquely identified to ensure traceability throughout the software development lifecycle and testing phases.
 
 #### 2.3.1 Functional Requirements
 
 **Node Orchestration and Management**
-*   **FR-01:** The system shall provide a Python-based orchestration engine (QIESetup Manager) to automate the download, installation, and initialization of the QIE Network V3 validator binary (qied).
+*   **FR-01:** The system shall provide a Python-based orchestration engine (QIESetupManager) to automate the download, installation, and initialization of the QIE Network V3 validator binary (qied).
 *   **FR-02:** The system shall automate the configuration of the validator node, including setting the moniker, configuring RPC/P2P ports, and applying the genesis block configuration.
 *   **FR-03:** The system shall monitor the validator node synchronization status via Tendermint RPC and report the current block height and catching-up state to the dashboard.
 
 **Transaction Ingestion and Processing**
-*   **FR-04:** The backend engine shall connect to the QIE Mainnet via Tendermint RPC interfaces to ingest live cross-chain transaction data.
+*   **FR-04:** The backend engine shall connect to the QIE Mainnet via Tendermint and standard EVM-compatible RPC interfaces to continuously ingest live pending (mempool) and confirmed (block) cross-chain transaction data.
 *   **FR-05:** The system shall normalize ingested cross-chain data into a unified schema, explicitly separating source chain, destination chain, transaction value, and sender/receiver addresses.
-*   **FR-06:** The system shall persist all ingested and processed transaction data in a relational database (PostgreSQL) for historical auditing and model retraining.
+*   **FR-06:** The system shall persist all ingested and processed transaction data in a relational database (PostgreSQL in production, SQLite in local development) via SQLAlchemy ORM for historical auditing and model retraining.
 
 **Anomaly Detection and Alerting**
 *   **FR-07:** The system shall implement an unsupervised machine learning pipeline utilizing the Isolation Forest algorithm to evaluate ingested transactions against historical baselines.
-*   **FR-08:** The Al Intelligence Core shall compute a dynamic risk score ranging from 0 to 100 for every processed transaction based on multivariate deviations in volume, frequency, and temporal patterns.
-*   **FR-09:** The system shall generate structured security alerts when a computed risk score breaches predefined operational thresholds.
-*   **FR-10:** The system shall categorize generated alerts into four severity levels: Critical, High, Medium, and Low, based on the magnitude of the risk score deviation.
+*   **FR-08:** The AI Intelligence Core shall compute a dynamic risk score ranging from 0 to 100 for every processed transaction based on multivariate deviations in volume, frequency, and temporal patterns.
+*   **FR-09:** The system shall monitor transaction risk scores and automatically generate structured security alerts the moment predefined security thresholds (risk score >= 40) are breached.
+*   **FR-10:** The system shall evaluate all transactions across a canonical four-tier severity scale (`Critical` [80–100], `High` [60–79], `Medium` [40–59], and `Low` [0–39]), automatically classifying and labeling all triggered security alerts into the three actionable alerting tiers: `Critical`, `High`, or `Medium` (while logging `Low` tier transactions as normal baseline activity).
 *   **FR-11:** The system shall store the reasoning behind an anomaly flag (e.g., "10x volume spike") and the ML model version used for inference within the database.
 
 **Dashboard Visualization and Interaction**
@@ -249,7 +249,7 @@ This section details the precise functional and non-functional requirements of t
 *   **NFR-06:** The system shall utilize intuitive visual cues (specifically red for high risk/critical, green for secure/active) to make complex security and operational data instantly readable without requiring deep technical interpretation of the raw data.
 
 **Compatibility**
-*   **NFR-07:** The system shall be fully compatible with the QIE Network V3 client and standard Tendermint RPC interfaces.
+*   **NFR-07:** The system shall be fully compatible with the QIE Network V3 client (`qied`), standard Tendermint RPC interfaces, and standard EVM RPC/Web3 interfaces.
 *   **NFR-08:** The backend API shall conform to RESTful architectural standards, returning data in JSON format to ensure compatibility with diverse client applications.
 
 **Modularity and Maintainability**
@@ -257,7 +257,7 @@ This section details the precise functional and non-functional requirements of t
 *   **NFR-10:** The database schema shall be managed via ORM (SQLAlchemy) and migration tools (Alembic) to ensure structural changes do not result in data loss.
 
 **Security**
-*   **NFR-11:** The Flask API gateway shall enforce API key authentication for external endpoints to prevent unauthorized access to validator telemetry and alert configurations.
+*   **NFR-11:** The Flask API gateway shall enforce cryptographic Web3 wallet authentication (EIP-191 nonce challenge-response issuing HS256 JWT Bearer tokens) and/or API key authentication on protected endpoints to prevent unauthorized access to validator telemetry and alert configurations.
 *   **NFR-12:** The system shall implement rate limiting (e.g., 100 requests per minute per IP) on the API gateway to mitigate denial-of-service attacks.
 
 ---
@@ -265,7 +265,7 @@ This section details the precise functional and non-functional requirements of t
 ## Chapter 3: Use Case Analysis
 
 ### 3.1 Introduction
-This chapter defines the behavioral requirements of the ValiGuard Al system through use case modeling. Use cases describe the primary interactions between the actors and the system, establishing the functional boundaries of the software. They serve as a foundation for deriving test cases and validating that the final implementation meets the operational needs of the validator ecosystem.
+This chapter defines the behavioral requirements of the ValiGuard AI system through use case modeling. Use cases describe the primary interactions between the actors and the system, establishing the functional boundaries of the software. They serve as a foundation for deriving test cases and validating that the final implementation meets the operational needs of the validator ecosystem.
 
 ### 3.2 Actors
 The following actors interact with the ValiGuard AI system:
@@ -285,7 +285,7 @@ The following actors interact with the ValiGuard AI system:
 | **Secondary Actor** | Backend Server, Web3 Wallet Provider |
 | **Pre-Condition** | User must have the dashboard application running and a compatible Web3 wallet extension installed in their browser. |
 | **Post-Condition** | Secure session established; access to real-time validator telemetry and personal alert configurations granted. |
-| **Basic Flow** | **Actor Action:**<br>1. User clicks "Connect Wallet" on the dashboard.<br>2. User selects their wallet account and approves the connection request in the wallet extension.<br>**System Action:**<br>1. System requests wallet connection via ethers.js.<br>2. System validates the wallet address and issues a session token/API key for data retrieval. |
+| **Basic Flow** | **Actor Action:**<br>1. User clicks "Connect Wallet" on the dashboard.<br>2. User selects their wallet account and approves the connection request in the wallet extension.<br>**System Action:**<br>1. System requests wallet connection via ethers.js and issues a single-use cryptographic nonce.<br>2. System verifies the EIP-191 wallet signature against the nonce and issues an HS256 JWT Bearer session token for protected telemetry retrieval. |
 
 ```mermaid
 flowchart LR
@@ -297,16 +297,16 @@ Operator[Validator Operator]
 subgraph UC01["UC-01: Authenticate & Connect Validator Wallet"]
 
     UC01_Main(("Authenticate & Connect Validator Wallet"))
-    UC01_Step1(("Initiate Wallet Connection via ethers.js"))
-    UC01_Step2(("Provide Wallet Approval"))
-    UC01_Step3(("Validate Wallet Address"))
-    UC01_Step4(("Issue Session Token / API Key"))
+    UC01_Step1(("Request Single-Use Nonce (/auth/request-nonce)"))
+    UC01_Step2(("Approve & Sign Nonce via Web3 Wallet (EIP-191)"))
+    UC01_Step3(("Verify Cryptographic Signature (/auth/verify)"))
+    UC01_Step4(("Issue HS256 JWT Bearer Session Token"))
 
 end
 
 %% Actor Connections
 Operator -->|"1. Clicks Connect Wallet"| UC01_Main
-Operator -->|"2. Selects & Approves"| UC01_Step2
+Operator -->|"2. Approves & Signs Nonce"| UC01_Step2
 
 %% Include Relationships
 UC01_Main -. "<<include>>" .-> UC01_Step1
@@ -337,14 +337,14 @@ subgraph UC02["UC-02: Automate Validator Node Setup"]
 
     UC02_Main(("Automate Validator Node Setup"))
     UC02_Step1(("Provide Configuration Parameters"))
-    UC02_Step2(("Validate Hardware & Download Binary"))
-    UC02_Step3(("Initialize & Configure Node"))
-    UC02_Step4(("Start Node & Report Sync Status"))
+    UC02_Step2(("Validate Hardware & Download qied Binary"))
+    UC02_Step3(("Initialize Node & Apply config.toml / genesis.json"))
+    UC02_Step4(("Start Node & Monitor RPC Sync Status"))
 
 end
 
 %% Actor Connections
-Operator -->|"1. Triggers Setup Script"| UC02_Main
+Operator -->|"1. Triggers QIESetupManager"| UC02_Main
 Operator -->|"2. Inputs Moniker/Chain-ID"| UC02_Step1
 
 %% Include Relationships
@@ -358,11 +358,11 @@ UC02_Main -. "<<include>>" .-> UC02_Step4
 | :--- | :--- |
 | **Use Case Name** | **Ingest & Analyze Cross-Chain Transactions** |
 | **Description** | Continuously ingests live transactions from the QIE network, normalizes the data, and executes the unsupervised ML pipeline to assign a dynamic risk score. |
-| **Primary Actor** | Al Intelligence Core |
+| **Primary Actor** | AI Intelligence Core |
 | **Secondary Actor** | QIE Blockchain (RPC), PostgreSQL Database |
 | **Pre-Condition** | The backend server is running, the RPC connection is active, and the ML model is loaded with established baselines. |
 | **Post-Condition** | Transaction is persisted in the database with an assigned risk score (0-100) and anomaly reasoning. |
-| **Basic Flow** | **Actor Action:**<br>1. (Automated) AI Core polls for new blocks/transactions.<br>**System Action:**<br>1. System fetches raw transaction data via Tendermint RPC.<br>2. System normalizes the data and extracts features (volume, frequency, temporal patterns).<br>3. System feeds features into the Isolation Forest model to compute an anomaly score.<br>4. System saves the transaction and its risk score to the database. |
+| **Basic Flow** | **Actor Action:**<br>1. (Automated) AI Core polls for new blocks/transactions.<br>**System Action:**<br>1. System fetches pending (mempool) and confirmed (block) transaction data via Tendermint RPC and standard EVM JSON-RPC.<br>2. System decodes and normalizes the cross-chain payload (`source_chain`, `destination_chain`, `value`, `sender`, `receiver`) and extracts features (volume, frequency, temporal patterns).<br>3. System feeds features into the Isolation Forest model to compute an anomaly score.<br>4. System saves the transaction and its risk score to the database. |
 
 ```mermaid
 flowchart LR
@@ -374,17 +374,17 @@ AICore[AI Intelligence Core]
 subgraph UC03["UC-03: Ingest & Analyze Cross-Chain Transactions"]
 
     UC03_Main(("Ingest & Analyze Cross-Chain Transactions"))
-    UC03_Step1(("Poll for New Blocks / Transactions"))
-    UC03_Step2(("Fetch Raw TX Data via Tendermint RPC"))
-    UC03_Step3(("Normalize Data & Extract Features"))
-    UC03_Step4(("Execute Isolation Forest Model"))
-    UC03_Step5(("Persist TX & Risk Score to Database"))
+    UC03_Step1(("Poll Mempool & Confirmed Blocks"))
+    UC03_Step2(("Fetch TX Data via Tendermint & EVM RPC"))
+    UC03_Step3(("Decode, Normalize Schema & Extract 6 Features"))
+    UC03_Step4(("Execute Isolation Forest Model (0-100 Score)"))
+    UC03_Step5(("Persist TX, Risk Score & Reasoning to DB"))
 
 end
 
 %% Actor Connections
-AICore -->|"1. Triggers Automated Process"| UC03_Main
-AICore -->|"1. Initiates Polling"| UC03_Step1
+AICore -->|"1. Triggers IngestionWorker"| UC03_Main
+AICore -->|"2. Initiates Continuous Polling"| UC03_Step1
 
 %% Include Relationships
 UC03_Main -. "<<include>>" .-> UC03_Step2
@@ -403,7 +403,7 @@ UC03_Main -. "<<include>>" .-> UC03_Step5
 | **Secondary Actor** | Backend Server, AI Intelligence Core |
 | **Pre-Condition** | Transactions have been processed and risk scores assigned (UC03 completed). |
 | **Post-Condition** | High-risk anomalies are displayed on the dashboard with color-coded severity indicators, and historical logs are updated. |
-| **Basic Flow** | **Actor Action:**<br>1. User views the real-time dashboard feed.<br>2. User identifies a color-coded (red/critical) alert.<br>**System Action:**<br>1. System checks if the computed risk score breaches Critical/High thresholds.<br>2. System generates an alert object containing severity, reasoning, and transaction hash.<br>3. System pushes the alert to the Next.js frontend via API/WebSocket for immediate visualization.
+| **Basic Flow** | **Actor Action:**<br>1. User views the real-time dashboard feed.<br>2. User identifies a color-coded (red/critical) alert.<br>**System Action:**<br>1. System checks if the computed risk score breaches predefined security thresholds (score >= 40: Medium, High, or Critical).<br>2. System generates an alert object containing severity tier (Critical, High, or Medium), contextual reasoning, and transaction hash.<br>3. System pushes the alert to the Next.js frontend via WebSocket and REST API for immediate visualization.
 
 ```mermaid
 flowchart LR
@@ -416,15 +416,15 @@ subgraph UC04["UC-04: Generate & Visualize Security Alerts"]
 
     UC04_Main(("Generate & Visualize Security Alerts"))
     UC04_Step1(("View Real-Time Dashboard Feed"))
-    UC04_Step2(("Check Risk Score vs Thresholds"))
-    UC04_Step3(("Generate Alert Object with Reasoning"))
-    UC04_Step4(("Push Alert to Next.js Frontend"))
+    UC04_Step2(("Evaluate Risk Score >= 40 Threshold"))
+    UC04_Step3(("Classify Alert Tier (Critical / High / Medium) & Reasoning"))
+    UC04_Step4(("Push Live Alert via WebSocket & REST API"))
 
 end
 
 %% Actor Connections
 Operator -->|"1. Views Dashboard"| UC04_Main
-Operator -->|"1. Actively Monitors"| UC04_Step1
+Operator -->|"2. Monitors & Resolves Alerts"| UC04_Step1
 
 %% Include Relationships
 UC04_Main -. "<<include>>" .-> UC04_Step2
@@ -438,7 +438,7 @@ UC04_Main -. "<<include>>" .-> UC04_Step4
 | **Use Case Name** | **Review Historical Alerts** |
 | **Description** | The operator queries the system for past security alerts and the AI reasoning behind them. |
 | **Primary Actor** | Validator Operator |
-| **Secondary Actor** | Al Intelligence Core |
+| **Secondary Actor** | AI Intelligence Core |
 | **Pre-Condition** | Historical alert data exists in the database. |
 | **Post-Condition** | The operator views the historical anomaly data. |
 | **Basic Flow** | **Actor Action:**<br>1. The operator requests historical alerts, optionally filtering by severity or date.<br>**System Action:**<br>1. The frontend sends a request to the Flask API.<br>2. The API queries the database for matching alert records.<br>3. The system returns the alerts, including the associated transaction and anomaly reasoning.<br>4. The frontend displays the historical data to the operator. |
@@ -453,16 +453,16 @@ Operator[Validator Operator]
 subgraph UC05["UC-05: Review Historical Alerts"]
 
     UC05_Main(("Review Historical Alerts"))
-    UC05_Step1(("Request Historical Alerts with Filters"))
-    UC05_Step2(("API Queries Database for Matching Records"))
-    UC05_Step3(("Retrieve Alerts & Anomaly Reasoning"))
-    UC05_Step4(("Display Historical Data to Operator"))
+    UC05_Step1(("Apply Severity, Status, Date & Hash Filters"))
+    UC05_Step2(("Query Database (/api/v1/alerts)"))
+    UC05_Step3(("Retrieve Flagged TXs & Contextual Reasoning"))
+    UC05_Step4(("Render Audit Table & Resolution Controls"))
 
 end
 
 %% Actor Connections
-Operator -->|"1. Requests History"| UC05_Main
-Operator -->|"1. Applies Filters"| UC05_Step1
+Operator -->|"1. Opens Alerts Audit Tab"| UC05_Main
+Operator -->|"2. Selects Audit Filters"| UC05_Step1
 
 %% Include Relationships
 UC05_Main -. "<<include>>" .-> UC05_Step2
@@ -478,9 +478,9 @@ UC05_Main -. "<<include>>" .-> UC05_Step4
 ValiGuard AI employs a layered, multi-tier architecture designed to ensure modularity, scalability, and clear separation of concerns. The system is decomposed into six distinct layers, each responsible for a specific domain of the application logic. This design ensures that the machine learning pipeline (AI Intelligence Core) can be upgraded independently of the data ingestion layer or the frontend presentation layer.
 
 **Architectural Layers:**
-1.  **External Source Layer:** Represents the QIE Blockchain network. The system interacts with this layer strictly through Tendermint RPC interfaces to read mempool data, block states, and node health.
+1.  **External Source Layer:** Represents the QIE Blockchain network. The system interacts with this layer through both Tendermint RPC (`:26657`) and standard EVM JSON-RPC (`:8545`) interfaces to capture pending mempool transactions, confirmed block states, and validator node telemetry.
 2.  **Ingestion and Orchestration Layer:** The operational bridge between the blockchain and the application. It handles the automated setup of validator nodes and the continuous polling of transaction data.
-3.  **Al Intelligence Core:** The analytical engine of the system. It receives normalized transaction data, extracts temporal and volumetric features, and executes unsupervised machine learning algorithms to compute risk scores.
+3.  **AI Intelligence Core:** The analytical engine of the system. It receives normalized transaction data, extracts temporal and volumetric features, and executes unsupervised machine learning algorithms to compute risk scores.
 4.  **Application and API Layer:** The central gateway built on Python/Flask. It manages business logic, handles REST API requests, orchestrates database transactions via SQLAlchemy, and pushes real-time alerts.
 5.  **Presentation Layer:** The client-facing interface built with Next.js and React. It consumes the API layer to render the unified dashboard, visualizing node metrics and color-coded security alerts.
 6.  **Data Persistence Layer:** The structural storage foundation of the system. Utilizing SQLAlchemy as the ORM and PostgreSQL as the primary relational database (with SQLite for development), this layer persists all normalized transactions, computed anomaly scores, generated alerts, and validator state. It ensures data durability for real-time querying, historical auditing, and future ML model retraining.
@@ -492,7 +492,7 @@ flowchart TB
 %% External Source Layer
 %% ==========================
 subgraph L1["External Source Layer"]
-    QIE_NET["QIE Blockchain Network<br/>(Tendermint RPC)"]
+    QIE_NET["QIE Blockchain Network<br/>(Tendermint RPC :26657 & EVM RPC :8545)"]
 end
 
 %% ==========================
@@ -500,22 +500,22 @@ end
 %% ==========================
 subgraph L2["Ingestion & Orchestration Layer"]
     ORCH["Node Orchestrator<br/>(QIESetupManager)"]
-    INGEST["Data Ingestion Engine<br/>(QIENodeManager)"]
+    INGEST["Data Ingestion Engine<br/>(QIENodeManager & IngestionWorker)"]
 end
 
 %% ==========================
 %% AI Intelligence Core
 %% ==========================
 subgraph L3["AI Intelligence Core"]
-    ML["Unsupervised ML Pipeline<br/>(Isolation Forest)"]
-    SCORE["Risk Scoring Engine"]
+    ML["Unsupervised ML Pipeline<br/>(FeatureExtractor & Isolation Forest)"]
+    SCORE["Risk Scoring Engine<br/>(AnomalyModel & core/scoring.py)"]
 end
 
 %% ==========================
 %% Application & API Layer
 %% ==========================
 subgraph L4["Application & API Layer"]
-    FLASK["Flask API Gateway<br/>(REST / WebSockets)"]
+    FLASK["Flask API Gateway & SocketManager<br/>(REST / WebSockets / Web3 JWT Auth)"]
     ORM["SQLAlchemy ORM<br/>(Alembic Migrations)"]
 end
 
@@ -523,33 +523,33 @@ end
 %% Presentation Layer
 %% ==========================
 subgraph L5["Presentation Layer"]
-    DASH["Validator Dashboard<br/>(Next.js / React)"]
+    DASH["Unified Validator Dashboard<br/>(Next.js / React / Chart.js)"]
 end
 
 %% ==========================
 %% Data Persistence Layer
 %% ==========================
 subgraph L6["Data Persistence Layer"]
-    DB[(PostgreSQL Database)]
+    DB[("PostgreSQL (Prod) / SQLite (Dev)")]
 end
 
 %% ==========================
 %% Data Flow & Dependencies
 %% ==========================
-QIE_NET -->|RPC Polling / Node Status| INGEST
-QIE_NET -->|Binary / Genesis Config| ORCH
+QIE_NET -->|"Mempool & Block Polling / Node Status"| INGEST
+QIE_NET -->|"Binary / Genesis Config"| ORCH
 
-INGEST -->|Normalized TX Data| ML
-ML -->|Anomaly Features| SCORE
+INGEST -->|"Normalized TX Data"| ML
+ML -->|"6 Extracted Features"| SCORE
 
-SCORE -->|Risk Score & Reasoning| FLASK
-INGEST -->|Raw TX Data| FLASK
-ORCH -->|Setup Commands| QIE_NET
+SCORE -->|"Risk Score (0-100), Tier & Reasoning"| FLASK
+INGEST -->|"Pending & Confirmed TXs"| FLASK
+ORCH -->|"Setup Commands"| QIE_NET
 
-FLASK -->|CRUD Operations| ORM
-ORM -->|SQL Queries| DB
+FLASK -->|"CRUD Operations"| ORM
+ORM -->|"SQL Queries"| DB
 
-FLASK -->|REST API / WebSockets| DASH
+FLASK -->|"REST API / Live WebSockets"| DASH
 ```
 ### 4.2 ERD with Data Dictionary
 The relational database schema is designed to capture the lifecycle of a cross-chain transaction, from initial ingestion through AI analysis to final alert generation. The schema adheres to third normal form (3NF) to minimize data redundancy and ensure referential integrity.
@@ -561,7 +561,9 @@ erDiagram
         INT id PK
         STRING address UK
         STRING chain_name
-        STRING status
+        ENUM status
+        DATETIME created_at
+        DATETIME last_verified_at
     }
 
     TRANSACTION {
@@ -573,9 +575,12 @@ erDiagram
         FLOAT value
         STRING sender
         STRING receiver
-        STRING status
+        DATETIME timestamp
+        ENUM status
         FLOAT anomaly_score
         BOOLEAN is_flagged
+        DATETIME created_at
+        DATETIME updated_at
     }
 
     ANOMALY_DETECTION {
@@ -585,17 +590,20 @@ erDiagram
         FLOAT confidence
         JSON features_used
         STRING model_version
-        STRING severity
+        DATETIME detected_at
+        ENUM severity
         STRING reason
     }
 
     ALERT {
         INT id PK
         INT transaction_id FK
-        STRING alert_type
-        STRING severity
+        ENUM alert_type
+        ENUM severity
         STRING message
         BOOLEAN is_resolved
+        DATETIME created_at
+        DATETIME resolved_at
     }
 
     VALIDATOR {
@@ -605,11 +613,12 @@ erDiagram
         FLOAT stake_amount
         FLOAT uptime_percentage
         BOOLEAN is_active
+        DATETIME joined_at
     }
 
-    BRIDGE ||--o{ TRANSACTION : has
-    TRANSACTION ||--o{ ANOMALY_DETECTION : triggers
-    TRANSACTION ||--o{ ALERT : generates
+    BRIDGE ||--o{ TRANSACTION : "routes"
+    TRANSACTION ||--o| ANOMALY_DETECTION : "evaluated_by"
+    TRANSACTION ||--o| ALERT : "triggers" 
 ```
 
 **Data Dictionary**
@@ -632,38 +641,45 @@ The following data dictionary defines the structural attributes, data types, and
 | :--- | :--- | :--- | :--- |
 | **id** | Integer | Primary Key, Auto-increment | Unique identifier for the transaction record. |
 | **tx_hash** | String(255) | Unique, Not Null, Indexed | Cryptographic hash of the transaction. |
-| **bridge_id** | Integer | Foreign Key (bridges.id), Indexed | Reference to the associated bridge. |
-| **source_chain** | String(50) | Not Null | The originating blockchain network. |
-| **destination_chain** | String(50) | Not Null | The destination blockchain network. |
-| **value** | Float | Not Null | The token amount transferred across the bridge. |
-| **sender** | String(255) | Not Null | The wallet address initiating the transfer. |
-| **receiver** | String(255) | Not Null | The destination wallet address. |
-| **status** | Enum | Not Null, Default: PENDING | Lifecycle state (PENDING, CONFIRMED, FAILED). |
-| **anomaly_score** | Float | Default: 0.0 | ML-computed risk probability from 0.0 to 100.0. |
-| **is_flagged** | Boolean | Indexed, Default: False | True if the anomaly_score breaches safety thresholds. |
+| **bridge_id** | Integer | Foreign Key (bridges.id), Nullable, Indexed | Reference to the associated bridge (Nullable for unmatched/raw entries). |
+| **source_chain** | String(50) | Nullable | The originating blockchain network (e.g., Ethereum, Polygon, BSC, QIE). |
+| **destination_chain** | String(50) | Nullable | The destination blockchain network. |
+| **value** | Float | Nullable | The token amount transferred across the bridge. |
+| **sender** | String(255) | Nullable | The wallet address initiating the transfer (decoded from EVM/Cosmos transaction payloads; `NULL` only for opaque raw entries). |
+| **receiver** | String(255) | Nullable | The destination wallet address. |
+| **timestamp** | DateTime | Not Null, Indexed | Block or mempool observation timestamp of the transaction. |
+| **status** | Enum | Not Null, Default: PENDING | Lifecycle state (`PENDING`, `CONFIRMED`, `FAILED`). |
+| **anomaly_score** | Float | Nullable, Default: 0.0 | ML-computed risk score from 0.0 to 100.0 (`NULL` if model unavailable). |
+| **is_flagged** | Boolean | Indexed, Default: False | `True` if `anomaly_score >= 40.0` (`MEDIUM`, `HIGH`, or `CRITICAL`). |
+| **created_at** | DateTime | Not Null, Indexed | Record creation timestamp. |
+| **updated_at** | DateTime | Nullable | Timestamp of most recent status or re-score update. |
 
 **Table 4.3: Data Dictionary: anomaly_detections**
 
 | Attribute | Data Type | Constraints | Description |
 | :--- | :--- | :--- | :--- |
 | **id** | Integer | Primary Key, Auto-increment | Unique identifier for the inference record. |
-| **transaction_id** | Integer | Foreign Key (transactions.id), Indexed | The specific transaction evaluated by the model. |
-| **anomaly_score** | Float | Not Null | The raw risk score output by the isolation forest model. |
-| **confidence** | Float | Not Null | The statistical confidence interval of the prediction. |
-| **features_used** | JSON | Nullable | Serialized array of variables that influenced the model. |
-| **severity** | Enum | Not Null, Indexed | Categorized risk (LOW, MEDIUM, HIGH, CRITICAL). |
-| **reason** | String(500) | Nullable | Human-readable explanation of the flagged behavior. |
+| **transaction_id** | Integer | Foreign Key (transactions.id), Not Null, Indexed | The specific transaction evaluated by the ML model. |
+| **anomaly_score** | Float | Not Null | The risk score (0.0–100.0) output by the Isolation Forest pipeline. |
+| **confidence** | Float | Not Null | The statistical confidence score (0.0–100.0) of the prediction. |
+| **features_used** | JSON | Nullable | Serialized dictionary of extracted feature values and availability flags. |
+| **model_version** | String(50) | Not Null | Version identifier/timestamp of the trained ML model artifact used. |
+| **detected_at** | DateTime | Not Null, Indexed | Timestamp when the anomaly detection was executed. |
+| **severity** | Enum | Not Null, Indexed | Canonical severity tier (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`). |
+| **reason** | String(500) | Nullable | Human-readable contextual explanation (e.g., `"10.0x volume spike vs. baseline"`). |
 
 **Table 4.4: Data Dictionary: alerts**
 
 | Attribute | Data Type | Constraints | Description |
 | :--- | :--- | :--- | :--- |
 | **id** | Integer | Primary Key, Auto-increment | Unique identifier for the alert instance. |
-| **transaction_id** | Integer | Foreign Key (transactions.id), Indexed | The transaction triggering the alert notification. |
-| **alert_type** | Enum | Not Null, Indexed | Classification of alert (ANOMALY, TIMEOUT, ERROR). |
-| **severity** | Enum | Not Null, Indexed | Priority level (INFO, WARNING, ERROR, CRITICAL). |
-| **message** | String(500) | Not Null | Detailed alert notification string sent to the dashboard. |
-| **is_resolved** | Boolean | Indexed, Default: False | Status flag indicating if the operator has addressed it. |
+| **transaction_id** | Integer | Foreign Key (transactions.id), Not Null, Indexed | The transaction triggering the alert notification. |
+| **alert_type** | Enum | Not Null, Indexed | Classification of alert (`ANOMALY`, `TIMEOUT`, `ERROR`). |
+| **severity** | Enum | Not Null, Indexed | Canonical severity tier (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`; alerts fire on `MEDIUM`+). |
+| **message** | String(500) | Not Null | Detailed alert notification string with score and reasoning. |
+| **is_resolved** | Boolean | Not Null, Indexed, Default: False | Status flag indicating if the operator has resolved the alert. |
+| **created_at** | DateTime | Not Null, Indexed | Timestamp when the alert was generated. |
+| **resolved_at** | DateTime | Nullable | Timestamp when the operator marked the alert as resolved. |
 
 **Table 4.5: Data Dictionary: validators**
 
@@ -677,7 +693,7 @@ The following data dictionary defines the structural attributes, data types, and
 | **is_active** | Boolean | Indexed, Default: True | Network consensus participation status. |
 
 ### 4.3 Data Flow Diagram
-Data Flow Diagrams (DFDs) illustrate how data moves through the ValiGuard Al system, detailing the processes that transform the data and the stores that hold it. The system is decomposed into two levels of abstraction.
+Data Flow Diagrams (DFDs) illustrate how data moves through the ValiGuard AI system, detailing the processes that transform the data and the stores that hold it. The system is decomposed into two levels of abstraction.
 
 #### 4.3.1 The Level 0 (Context Diagram)
 The Level 0 DFD provides the highest-level view of the system, treating ValiGuard AI as a single process interacting with external entities.
@@ -694,7 +710,7 @@ flowchart LR
 
 %% External Entities
 VO["Validator Operator"]
-BC["QIE Blockchain"]
+BC["QIE Blockchain (Tendermint & EVM RPC)"]
 SA["Security Auditor"]
 
 %% Main Process
@@ -702,15 +718,15 @@ VG(("0: ValiGuard AI System"))
 
 %% Data Flows
 VO -->|"Configuration Parameters & Setup Requests"| VG
-VO -->|"API Authentication / Wallet Connection"| VG
+VO -->|"Web3 EIP-191 Wallet Signature / Auth"| VG
 
-VG -->|"Dashboard Visuals, Alerts, & Node Metrics"| VO
+VG -->|"Live Dashboard Telemetry, WebSocket Alerts & Node Health"| VO
 
-BC -->|"Raw Block Data, Mempool TX, Node Status"| VG
-VG -->|"Setup Commands, Configuration Writes"| BC
+BC -->|"Pending Mempool TXs, Confirmed Blocks & Validator Set"| VG
+VG -->|"Node Orchestration & Configuration Writes"| BC
 
-VG -->|"Historical Anomaly Data / Audit Logs"| SA
-SA -->|"Log Query Parameters"| VG
+VG -->|"Filtered Alert History & Contextual Reasoning"| SA
+SA -->|"Audit Filter Parameters (Severity, Date, Status, Hash)"| VG
 ```
 
 #### 4.3.2 The Level 1
@@ -735,48 +751,83 @@ BC["QIE Blockchain"]
 
 %% Processes
 P1(("1.0 Node Orchestration"))
-P2(("2.0 Transaction Ingestion"))
-P3(("3.0 Anomaly Detection"))
-P4(("4.0 Dashboard & Alerting"))
+P2(("2.0 Mempool & Block Ingestion"))
+P3(("3.0 AI Anomaly Detection"))
+P4(("4.0 Dashboard & WebSocket Alerting"))
 
 %% Data Store
-DB[(D1: PostgreSQL Database)]
+DB[("D1: PostgreSQL / SQLite DB")]
 
 %% Data Flows
 VO -->|"Setup Config"| P1
+P1 -->|"qied Commands"| BC
 
-P1 -->|"Setup Commands"| BC
+BC -->|"Mempool & Block RPC Data"| P2
+BC -->|"Node & Validator Telemetry"| P2
 
-BC -->|"Raw RPC Data"| P2
-BC -->|"Node Status"| P2
+P2 -->|"Decoded & Normalized TXs"| P3
+P3 -->|"TX + 0-100 Risk Score + Reasoning"| DB
 
-P2 -->|"Normalized TX Data"| DB
+DB -->|"Historical & Analytics Data"| P4
+P3 -->|"Medium / High / Critical Alert Trigger (Score >= 40)"| P4
 
-DB -->|"TX Features"| P3
-P3 -->|"Risk Scores & Reasoning"| DB
-
-DB -->|"Historical & Live Data"| P4
-P3 -->|"Critical Anomaly Trigger"| P4
-
-P4 -->|"Real-time Alerts & UI Data"| VO
-P4 -->|"Historical Anomaly Data / Audit Logs"| SA
+P4 -->|"Real-Time WebSocket Alerts & UI Telemetry"| VO
+P4 -->|"Filtered Historical Alerts & Reasoning"| SA
 ```
 
 ### 4.4 Class Diagram
-The Class Diagram models the static structure of the ValiGuard Al backend, specifically detailing the SQLAlchemy ORM models and their relationships, alongside the primary manager classes that handle system logic.
+The Class Diagram models the static structure of the ValiGuard AI backend, specifically detailing the SQLAlchemy ORM models and their relationships, alongside the primary manager classes that handle system logic.
 
 ```mermaid
 classDiagram
 
 class QIENodeManager {
     +str rpc_url
+    +str evm_rpc_url
     +str chain_id
-
+    +str moniker
     +start_qie_node() dict
     +stop_qie_node() dict
     +check_node_health() dict
+    +get_validator_set() dict
     +query_balance(address: str) dict
     +broadcast_transaction(tx: dict) dict
+}
+
+class IngestionWorker {
+    +QIENodeManager node_manager
+    +DatabaseManager db_manager
+    +AnomalyModel anomaly_model
+    +float poll_interval
+    +start() void
+    +stop() void
+    +poll_once() list
+    +process_raw_transaction(raw_tx: dict) dict
+}
+
+class FeatureExtractor {
+    +int rolling_window_hours
+    +int history_size
+    +float normalization_percentile
+    +extract_features(transaction) ndarray
+    +extract_batch(transactions) ndarray
+}
+
+class AnomalyModel {
+    +IsolationForest model
+    +FeatureExtractor feature_extractor
+    +str model_version
+    +score(transaction) dict
+    +is_loaded() bool
+    +get_model_info() dict
+}
+
+class SocketManager {
+    +SocketIO socketio
+    +str dashboard_room
+    +emit_transaction(transaction: dict) void
+    +emit_node_status(status: dict) void
+    +emit_alert_resolved(alert: dict) void
 }
 
 class Validator {
@@ -786,7 +837,6 @@ class Validator {
     +float stake_amount
     +float uptime_percentage
     +bool is_active
-
     +to_dict() dict
 }
 
@@ -796,7 +846,6 @@ class Bridge {
     +str chain_name
     +BridgeStatus status
     +datetime created_at
-
     +to_dict() dict
 }
 
@@ -809,18 +858,11 @@ class Transaction {
     +float value
     +str sender
     +str receiver
+    +datetime timestamp
     +TransactionStatus status
     +float anomaly_score
     +bool is_flagged
-
     +to_dict() dict
-}
-
-class AnomalyDetector {
-    +IsolationForest model
-
-    +calculate_risk_score(features) tuple
-    +train_model(data) void
 }
 
 class AnomalyDetection {
@@ -830,9 +872,9 @@ class AnomalyDetection {
     +float confidence
     +dict features_used
     +str model_version
+    +datetime detected_at
     +SeverityLevel severity
     +str reason
-
     +to_dict() dict
 }
 
@@ -840,22 +882,23 @@ class Alert {
     +int id
     +int transaction_id
     +AlertType alert_type
-    +AlertSeverity severity
+    +SeverityLevel severity
     +str message
     +bool is_resolved
-
+    +datetime created_at
+    +datetime resolved_at
     +to_dict() dict
 }
 
 Bridge "1" --> "*" Transaction : has
-
-Transaction "1" --> "*" AnomalyDetection : triggers
-
-Transaction "1" --> "*" Alert : generates
-
-QIENodeManager --> Transaction : ingests
-
-AnomalyDetector --> AnomalyDetection : generates
+Transaction "1" --> "0..1" AnomalyDetection : triggers
+Transaction "1" --> "0..1" Alert : generates
+QIENodeManager <-- IngestionWorker : polls RPC
+IngestionWorker --> Transaction : normalizes & persists
+IngestionWorker --> AnomalyModel : scores via
+AnomalyModel --> FeatureExtractor : extracts 6 features
+AnomalyModel --> AnomalyDetection : generates
+IngestionWorker --> SocketManager : broadcasts events
 ```
 
 ### 4.5 Activity Diagram
@@ -869,19 +912,19 @@ Start([Start])
 
 A{System Requirements Met?}
 
-B[Download QIE Binary]
-C[Initialize Node Directory & Keys]
+B[Download QIE Binary qied]
+C[Initialize Node Directory & Validator Keys]
 D[Apply config.toml & app.toml Settings]
-E[Fetch & Apply Genesis Block]
+E[Fetch & Validate genesis.json]
 
 F([Start qied Process])
 
 G{Node Synced with Network?}
 
-H[Wait & Poll RPC Status]
+H[Wait & Poll Tendermint RPC /status]
 
-Success([Node Active & Ready])
-Error([Halt & Report Error])
+Success([Node Active & Synced])
+Error([Halt & Report Validation Error])
 
 Start --> A
 
@@ -905,33 +948,36 @@ G -- Yes --> Success
 This diagram details the core intelligence pipeline of ValiGuard AI, representing the transition from raw blockchain data to actionable risk assessment. It visualizes how the QIENodeManager ingests unstructured transaction data via RPC, normalizes it, and persists it to the database. The flow then transitions to the AI Intelligence Core, where multivariate features (volume, frequency, temporal patterns) are extracted and evaluated by the Isolation Forest algorithm. The decision node is pivotal, representing the exact moment unsupervised machine learning distinguishes between standard network noise and a statistically significant anomaly, thereby triggering the flagging mechanism.
 
 ```mermaid
+
 flowchart TD
 
-Start([New TX Observed])
+Start(["New Mempool or Block TX Observed"])
 
-A[QIENodeManager Polls RPC]
+A["IngestionWorker Polls Tendermint & EVM RPC"]
 
-B[Ingest & Normalize Transaction Data]
+B["Decode & Normalize Cross-Chain Transaction"]
 
-C[Save Transaction to Database]
+C["Extract 6 Multivariate Features<br/>Normalized Value • Sender Frequency • Cyclical Time"]
 
-D[Extract Features<br/>Volume • Frequency • Temporal]
+D["Execute Isolation Forest Inference<br/>AnomalyModel.score"]
 
-E[Execute Isolation Forest Inference]
+E["Compute Risk Score 0–100 & Contextual Reason"]
 
-F["Compute Risk Score (0–100)"]
+F{"Risk Score >= 40?<br/>Medium / High / Critical"}
 
-G{Risk Score > Threshold?}
+G["Classify as Low Risk (0–39)<br/>is_flagged = False"]
 
-H[Mark Transaction as Normal]
+H["Persist Transaction & AnomalyDetection Record"]
 
-I[Flag Transaction<br/>is_flagged = True]
+I["Flag Transaction (is_flagged = True)<br/>Persist Transaction & AnomalyDetection Record"]
 
-J[Generate AnomalyDetection Record]
+J["Generate & Persist Alert Record<br/>Tier: Critical (80–100) / High (60–79) / Medium (40–59)"]
 
-K[Trigger Alert Generation Process]
+K["Emit WebSocket Events via SocketManager<br/>new_transaction • new_anomaly • new_alert"]
 
-End([End])
+L["Emit WebSocket Events via SocketManager<br/>new_transaction • new_anomaly"]
+
+End(["End"])
 
 Start --> A
 A --> B
@@ -939,45 +985,48 @@ B --> C
 C --> D
 D --> E
 E --> F
-F --> G
 
-G -- No --> H
-H --> End
+F -- "No (< 40)" --> G
+G --> H
+H --> L
+L --> End
 
-G -- Yes --> I
+F -- "Yes (>= 40)" --> I
 I --> J
 J --> K
+K --> End
 ```
 
 #### 4.5.3 Activity Diagram: Alert Generation and Dashboard Visualization
 This activity diagram captures the lifecycle of a security alert once an anomaly is detected. It demonstrates the bridge between backend ML inference and frontend user experience. The flow begins immediately after a risk threshold breach, showing how the system maps the numerical anomaly score to a categorized severity level (Critical, High, Medium, Low). It details the persistence of the alert in the PostgreSQL database and the subsequent propagation of the alert payload via WebSocket/REST API to the Next.js frontend. Finally, it illustrates the human-in-the-loop resolution process, where the validator operator reviews the visual alert and formally closes the loop by updating the database record.
 
 ```mermaid
+
 flowchart TD
 
-Start([Anomaly Threshold Breached])
+Start(["Anomaly Threshold Breached: Score >= 40"])
 
-A[Create Alert Object<br/>with Severity Level]
+A["Classify Alert into 3 Actionable Tiers<br/>Critical (80–100) • High (60–79) • Medium (40–59)"]
 
-B[Map Score to<br/>Critical / High / Medium / Low]
+B["Attach Contextual Reasoning<br/>e.g., 10.0x volume spike vs. baseline"]
 
-C[Persist Alert to PostgreSQL]
+C["Persist Alert Row in Database<br/>is_resolved = False"]
 
-D[Push Alert via WebSocket / REST API]
+D["Broadcast new_alert Event via SocketManager"]
 
-E[Frontend Receives Alert]
+E["Next.js Dashboard Receives Live Alert"]
 
-F[Render Color-Coded Notification]
+F["Render Color-Coded Alert Banner & Feed Row"]
 
-G{Operator Reviews Alert}
+G{"Operator Reviews Alert"}
 
-H[Marks Alert as Resolved]
+H["Clicks Mark Resolved on Dashboard"]
 
-I[Dismiss as False Positive]
+I["PATCH /api/v1/alerts/:id/resolve<br/>Update is_resolved = True & resolved_at"]
 
-J[Update is_resolved = True]
+J["Broadcast alert_resolved via SocketManager<br/>Update Connected Dashboards"]
 
-End([End])
+End(["End"])
 
 Start --> A
 A --> B
@@ -986,13 +1035,9 @@ C --> D
 D --> E
 E --> F
 F --> G
-
 G --> H
-G --> I
-
-H --> J
+H --> I
 I --> J
-
 J --> End
 ```
 
@@ -1002,28 +1047,29 @@ This diagram outlines the secure authentication workflow designed for the valida
 ```mermaid
 flowchart TD
 
-Start([User Opens Dashboard])
+Start([Operator Opens Next.js Dashboard])
 
 A[Click Connect Wallet]
 
-B[MetaMask Prompts User]
+B[Request Wallet Account via ethers.js]
 
-C{User Approves Connection?}
+C{User Approves Account Access?}
 
-D[Show Unauthenticated Dashboard]
+D[Remain in Unauthenticated View<br/>Public Node Status & Live Feed Only]
 
-E[User Signs Message]
+E[POST /api/v1/auth/request-nonce with Wallet Address]
 
-F[Backend Validates Signature & Address]
+F[Wallet Prompts User to Sign EIP-191 Nonce Message]
 
-G[Issue Session Token / API Key]
+G{User Signs Message & Signature Valid?}
 
-H[Grant Access to Secure API Endpoints]
+H[POST /api/v1/auth/verify<br/>Consume Single-Use Nonce & Recover Signer]
 
-I[Render Live Telemetry & Alerts]
+I[Issue 24h HS256 JWT Bearer Token]
 
-Session([Session Active])
+J[Unlock Protected Telemetry, Validator Stats & Alert Auditing]
 
+Session([Authenticated Session Active])
 Denied([Access Denied])
 
 Start --> A
@@ -1036,42 +1082,52 @@ D --> Denied
 C -- Yes --> E
 E --> F
 F --> G
-G --> H
+
+G -- No --> D
+
+G -- Yes --> H
 H --> I
-I --> Session
+I --> J
+J --> Session
 ```
 
 ### 4.6 Sequence Diagrams
 Sequence diagrams model the time-ordered interaction between system components, illustrating how objects collaborate to fulfill specific use cases.
 
 #### 4.6.1 Sequence Diagram: Real-Time Anomaly Detection and Alerting
-This sequence diagram illustrates the core intelligence pipeline of ValiGuard AI. It captures the chronological message flow from the moment the backend ingests a raw transaction from the QIE network to the point a security alert is rendered on the validator dashboard. It highlights the asynchronous nature of the ML inference and the decoupled communication between the Al Intelligence Core and the Presentation Layer via the database and REST API.
+This sequence diagram illustrates the core intelligence pipeline of ValiGuard AI. It captures the chronological message flow from the moment the backend ingests a raw transaction from the QIE network to the point a security alert is rendered on the validator dashboard. It highlights the asynchronous nature of the ML inference and the decoupled communication between the AI Intelligence Core and the Presentation Layer via the database and REST API.
 
 ```mermaid
 sequenceDiagram
-    participant RPC as QIE Network (RPC)
-    participant Node as QIENodeManager
-    participant API as Flask API Gateway
-    participant AI as AnomalyDetector (AI Core)
-    participant DB as PostgreSQL Database
+    participant RPC as QIE Network (Tendermint & EVM RPC)
+    participant Worker as IngestionWorker (QIENodeManager)
+    participant Scorer as ScoringEngine (core/scoring.py)
+    participant AI as AnomalyModel & FeatureExtractor
+    participant DB as Database (PostgreSQL / SQLite)
+    participant WS as SocketManager (Socket.IO)
     participant UI as Next.js Dashboard
 
-    RPC->>Node: 1. Broadcast Raw Transaction Data
-    Node->>API: 2. Forward Normalized TX Data
-    API->>DB: 3. INSERT Transaction Record (Risk = Null)
+    RPC->>Worker: 1. Return Pending (Mempool) or Confirmed (Block) TX
+    Worker->>Worker: 2. Decode & Normalize Cross-Chain Fields
+    Worker->>Scorer: 3. score_and_persist_transaction()
 
-    API->>AI: 4. Request Risk Inference (TX Features)
-    AI->>AI: 5. Execute Isolation Forest Algorithm
-    AI-->>API: 6. Return Risk Score & Reasoning
+    Scorer->>AI: 4. score(transaction)
+    AI->>AI: 5. Extract 6 Features & Run Isolation Forest
+    AI-->>Scorer: 6. Return Risk Score (0-100), Confidence, Tier & Reason
 
-    alt Risk Score > Critical Threshold
-        API->>DB: 7. UPDATE Transaction (is_flagged=True)
-        API->>DB: 8. INSERT AnomalyDetection & Alert Records
-        API-->>UI: 9. Push Alert Payload (WebSocket/API)
-        UI->>UI: 10. Render Color-Coded Alert Notification
-    else Risk Score Normal
-        API->>DB: 11. UPDATE Transaction (anomaly_score)
-        API-->>UI: 12. HTTP 200 OK (No Alert)
+    alt Risk Score >= 40 (Medium / High / Critical)
+        Scorer->>DB: 7. UPSERT Transaction (is_flagged=True, anomaly_score)
+        Scorer->>DB: 8. UPSERT AnomalyDetection & Alert (Critical/High/Medium)
+        DB-->>Worker: 9. Commit Transaction
+        Worker->>WS: 10. emit_transaction() (new_transaction, new_anomaly, new_alert)
+        WS-->>UI: 11. Push Live WebSocket Events (<100ms)
+        UI->>UI: 12. Render Color-Coded Alert & Flagged TX Row
+    else Risk Score < 40 (Low / Normal)
+        Scorer->>DB: 13. UPSERT Transaction (is_flagged=False, anomaly_score)
+        Scorer->>DB: 14. UPSERT AnomalyDetection (severity=LOW)
+        DB-->>Worker: 15. Commit Transaction
+        Worker->>WS: 16. emit_transaction() (new_transaction, new_anomaly)
+        WS-->>UI: 17. Update Live Transaction Feed (No Alert)
     end
 ```
 
@@ -1087,25 +1143,21 @@ sequenceDiagram
     participant RPC as QIE Network (RPC)
 
     Operator->>Setup: 1. Trigger Setup (Moniker, Chain-ID)
+    Setup->>Setup: 2. Validate CPU, RAM & Disk Requirements
+    Setup->>FS: 3. Download & Validate qied ELF Binary
+    Setup->>Node: 4. Execute qied init
+    Node->>FS: 5. Generate priv_validator_key.json & config.toml
+    Setup->>FS: 6. Patch config.toml (RPC :26657, P2P :26656, CORS) & app.toml
+    Setup->>FS: 7. Initialize & Validate genesis.json
+    Setup->>Node: 8. Execute qied start
 
-    Setup->>FS: 2. Download & Extract QIE Binary
-
-    Setup->>Node: 3. Execute qied init
-
-    Node->>FS: 4. Generate priv_validator_key.json & config.toml
-
-    Setup->>FS: 5. Overwrite config.toml
-    Setup->>FS: 6. Fetch & Save genesis.json
-
-    Setup->>Node: 7. Execute qied start
-
-    loop Until Synced
-        Node->>RPC: 8. Poll for Blocks (catchup)
-        RPC-->>Node: 9. Return Block Data
+    loop Until Synced (catching_up == false)
+        Node->>RPC: 9. Sync Blocks & Consensus State
+        RPC-->>Node: 10. Return Block Data
     end
 
-    Node-->>Setup: 10. Node Synced & Active
-    Setup-->>Operator: 11. Setup Complete Notification
+    Node-->>Setup: 11. Node Synced & Healthy
+    Setup-->>Operator: 12. Setup Complete Summary
 ```
 
 #### 4.6.3 Sequence Diagram: Web3 Wallet Authentication
@@ -1114,32 +1166,30 @@ This diagram models the cryptographic authentication flow. It shows how the Next
 ```mermaid
 sequenceDiagram
     participant User as Validator Operator
-    participant UI as Next.js Dashboard
-    participant Wallet as MetaMask (Web3 Wallet)
-    participant API as Flask API Gateway
+    participant UI as Next.js Dashboard (WalletConnect)
+    participant Wallet as MetaMask (EVM Wallet)
+    participant API as Flask API (/api/v1/auth)
 
     User->>UI: 1. Click "Connect Wallet"
     UI->>Wallet: 2. eth_requestAccounts
 
-    alt User Rejects
-        Wallet-->>UI: 3. Connection Denied
+    alt User Rejects Connection
+        Wallet-->>UI: 3. Connection Rejected (4001)
         UI-->>User: 4. Display Unauthenticated State
-    else User Approves
-        Wallet-->>UI: 5. Return Wallet Address
+    else User Approves Connection
+        Wallet-->>UI: 5. Return Checksummed Wallet Address
+        UI->>API: 6. POST /api/v1/auth/request-nonce {address}
+        API-->>UI: 7. Return Single-Use Nonce & EIP-191 Sign Message (TTL 300s)
 
-        UI->>API: 6. POST /auth/request-nonce
-        API-->>UI: 7. Return Server Nonce
+        UI->>Wallet: 8. signer.signMessage(message)
+        Wallet->>User: 9. Prompt Signature Approval
+        User->>Wallet: 10. Confirm Signature
+        Wallet-->>UI: 11. Return Hex Signature
 
-        UI->>Wallet: 8. Request Signature (Nonce)
-        Wallet->>User: 9. Prompt "Sign Message"
-        User->>Wallet: 10. Approve Signature
-        Wallet-->>UI: 11. Return Cryptographic Signature
-
-        UI->>API: 12. POST /auth/verify (Address, Signature)
-        API->>API: 13. Verify Signature against Nonce
-        API-->>UI: 14. Return JWT / API Key
-
-        UI->>UI: 15. Store Session & Grant Access
+        UI->>API: 12. POST /api/v1/auth/verify {address, nonce, signature}
+        API->>API: 13. Consume Nonce & Recover Signer (eth_account)
+        API-->>UI: 14. Return HS256 JWT Bearer Token (TTL 24h)
+        UI->>UI: 15. Store JWT & Unlock Protected Telemetry Endpoints
     end
 ```
 
@@ -1147,123 +1197,130 @@ sequenceDiagram
 Collaboration diagrams (also known as Communication diagrams in UML 2.x) emphasize the structural organization of objects that send and receive messages, rather than the chronological order of the messages. They are ideal for visualizing the architectural dependencies and data pathways within ValiGuard AI.
 
 #### 4.7.1 Collaboration Diagram: System Component Interaction
-This collaboration diagram illustrates how the primary structural components of ValiGuard Al interact to achieve the system's goals. It highlights that the Flask API Gateway acts as the central hub, mediating data flow between the external blockchain, the internal Al engine, the persistent storage, and the user interface.
+This collaboration diagram illustrates how the primary structural components of ValiGuard AI interact to achieve the system's goals. It highlights that the Flask API Gateway acts as the central hub, mediating data flow between the external blockchain, the internal AI engine, the persistent storage, and the user interface.
 
 ```mermaid
 flowchart TD
 
-Blockchain["QIE Blockchain Network"]
+Blockchain["QIE Blockchain Network<br/>(Tendermint RPC & EVM RPC)"]
 
-NodeMgr["QIENodeManager"]
+NodeMgr["QIENodeManager & IngestionWorker"]
 Setup["QIESetupManager"]
 
-Flask["Flask API Gateway"]
+Flask["Flask API Gateway & SocketManager"]
 
-Anomaly["AnomalyDetector Engine"]
+Anomaly["AnomalyModel & FeatureExtractor"]
 
-DB[(PostgreSQL Database)]
+DB[("PostgreSQL / SQLite Database")]
 
-Dashboard["Next.js Dashboard"]
+Dashboard["Next.js Validator Dashboard"]
 
-Blockchain -->|"1. Raw RPC Data"| NodeMgr
+Blockchain -->|"1. Mempool & Block RPC Streams"| NodeMgr
 Blockchain -->|"1. Genesis / Binary"| Setup
 
-NodeMgr -->|"2. Normalized TX Data"| Flask
-Setup -->|"2. Node Status"| Flask
+NodeMgr -->|"2. Decoded & Normalized TXs"| Flask
+Setup -->|"2. Node Configuration & Status"| Flask
 
-Flask -->|"3. Extracted Features"| Anomaly
-Anomaly -->|"4. Risk Score & Reasoning"| Flask
+Flask -->|"3. Transaction Object"| Anomaly
+Anomaly -->|"4. Risk Score (0-100), Tier & Reason"| Flask
 
-Flask -->|"5. Read / Write Queries"| DB
+Flask -->|"5. SQLAlchemy ORM Read / Write"| DB
 
-Flask -->|"6. REST / WebSocket Payloads"| Dashboard
-Dashboard -->|"7. User Auth / Queries"| Flask
+Flask -->|"6. REST JSON & Socket.IO Events"| Dashboard
+Dashboard -->|"7. Web3 JWT Auth & Audit Queries"| Flask
 ```
 
-#### 4.7.2 Collaboration Diagram: Al Intelligence Core Object Collaboration
-This diagram zooms into the AI Intelligence Core, detailing the structural collaboration between the Python objects responsible for transforming raw transaction data into actionable security alerts. It illustrates how the AnomalyDetector relies on feature extraction from the Transaction model, utilizes the IsolationForest algorithm, and subsequently instantiates the AnomalyDetection and Alert models to persist the inference results.
+#### 4.7.2 Collaboration Diagram: AI Intelligence Core Object Collaboration
+This diagram zooms into the AI Intelligence Core, detailing the structural collaboration between the Python objects responsible for transforming raw transaction data into actionable security alerts. It illustrates how the AnomalyModel relies on feature extraction from the Transaction model, utilizes the IsolationForest algorithm, and subsequently instantiates the AnomalyDetection and Alert models to persist the inference results.
 
 ```mermaid
 flowchart LR
 
-Flask["Flask API Gateway"]
-
-NodeMgr["QIENodeManager"]
+Worker["IngestionWorker / Flask API"]
 
 TX["Transaction Object"]
 
-Detector["AnomalyDetector Engine"]
+Extractor["FeatureExtractor<br/>(6 Features)"]
 
-Forest["Isolation Forest Model"]
+Forest["IsolationForest<br/>(scikit-learn)"]
 
-Detection["AnomalyDetection Object"]
+Model["AnomalyModel<br/>(Risk Scoring & Reasoning)"]
 
-Alert["Alert Object"]
+Detection["AnomalyDetection Object<br/>(Low / Medium / High / Critical)"]
 
-DB[(PostgreSQL Database)]
+Alert["Alert Object<br/>(Medium / High / Critical)"]
 
-Flask -->|"1. Ingest TX"| NodeMgr
+DB[("PostgreSQL / SQLite DB")]
 
-NodeMgr -->|"2. Instantiate"| TX
+Socket["SocketManager<br/>(WebSocket Push)"]
 
-Flask -->|"3. Request Inference"| Detector
-
-Detector -->|"4. Extract Features"| TX
-
-Detector -->|"5. Execute predict()"| Forest
-
-Forest -->|"6. Return Anomaly Score"| Detector
-
-Detector -->|"7. Instantiate & Populate"| Detection
-
-Detector -->|"8. Instantiate & Populate"| Alert
-
-Detection -->|"9. Persist"| DB
-
-Alert -->|"9. Persist"| DB
+Worker -->|"1. Normalize & Instantiate"| TX
+Worker -->|"2. Invoke score()"| Model
+Model -->|"3. extract_features(TX)"| Extractor
+Extractor -->|"4. 6-D Feature Vector"| Model
+Model -->|"5. predict() & decision_function()"| Forest
+Forest -->|"6. Raw Decision Score"| Model
+Model -->|"7. Populate Score, Tier & Reason"| Detection
+Model -->|"8. If Score >= 40, Instantiate"| Alert
+Detection -->|"9. Commit via SQLAlchemy"| DB
+Alert -->|"9. Commit via SQLAlchemy"| DB
+DB -->|"10. Post-Commit Callback"| Socket
 ```
 
 ### 4.8 State Transition Diagrams
 State Transition Diagrams model the dynamic behavior of entities within the system, illustrating the distinct states an object can occupy and the triggers that cause transitions between those states.
 
 #### 4.8.1 The Transaction Lifecycle
-This diagram illustrates the lifecycle of a cross-chain transaction from the moment it is ingested by the ValiGuard AI system. It reflects the states defined in the TransactionStatus enumeration (PENDING, CONFIRMED, FAILED, and NORMAL) and incorporates the Al-driven flagging mechanism. A critical adjustment in this diagram is the representation of the "Flagged" state; rather than altering the execution status of the blockchain transaction itself, the ML inference engine triggers a transition in the is_flagged boolean attribute if the computed anomaly score breaches operational thresholds, moving the transaction into a state requiring operator review.
+This diagram illustrates the lifecycle of a cross-chain transaction from the moment it is ingested by the ValiGuard AI system. It reflects the states defined in the TransactionStatus enumeration (PENDING, CONFIRMED, and FAILED) alongside the post-evaluation review states (Normal vs. UnderReview / Resolved via `is_flagged` and `Alert.is_resolved`). A critical adjustment in this diagram is the representation of the "Flagged" state; rather than altering the execution status of the blockchain transaction itself, the ML inference engine triggers a transition in the is_flagged boolean attribute if the computed anomaly score breaches operational thresholds, moving the transaction into a state requiring operator review.
 
 ```mermaid
+
 stateDiagram-v2
 
-[*] --> Pending : Ingested via RPC
+[*] --> Pending : Captured from Mempool RPC (unconfirmed_txs / pending)
 
-Pending --> Confirmed : Block Finality Achieved
+Pending --> PendingFlagged : ML Score >= 40 (is_flagged = True)\nPre-Settlement Alert Emitted
+
+Pending --> PendingNormal : ML Score < 40 (is_flagged = False)
+
+PendingFlagged --> Confirmed : Block Finality Achieved\n(Idempotent Re-Score In Place)
+
+PendingNormal --> Confirmed : Block Finality Achieved\n(Idempotent Re-Score In Place)
+
+Pending --> Confirmed : Direct Block Ingestion
+
 Pending --> Failed : Network Rejection / Timeout
 
-Confirmed --> UnderReview : ML Score > Threshold\n(is_flagged = True)
-Confirmed --> Normal : ML Score < Threshold
+Confirmed --> UnderReview : ML Score >= 40 (Medium / High / Critical)\n(is_flagged = True & Alert Active)
 
-UnderReview --> Resolved : Operator Dismisses Alert
+Confirmed --> Normal : ML Score < 40 (Low)\n(is_flagged = False)
+
+UnderReview --> Resolved : Operator Marks Alert Resolved\n(Alert.is_resolved = True)
 
 Failed --> [*]
 Resolved --> [*]
 Normal --> [*]
+
 ```
 
 #### 4.8.2 The Validator Node Lifecycle
 This state diagram maps directly to the orchestration logic encapsulated within the QIESetupManager and QIENodeManager classes. It models the validator node's journey from an uninitialized system to an active participant in the QIE consensus. The diagram highlights the cyclical "Syncing" state, where the system continuously polls the Tendermint RPC (catching_up = true) until the local block height matches the network, triggering the transition to the "Active" state. It also accounts for error handling and graceful shutdown procedures.
 
 ```mermaid
+
 stateDiagram-v2
 
 [*] --> Uninitialized : Host Provisioned
 
-Uninitialized --> Installed : QIESetupManager downloads binary
+Uninitialized --> Installed : QIESetupManager downloads qied binary
 
-Installed --> Configured : config.toml & genesis.json applied
+Installed --> Configured : config.toml, app.toml & genesis.json applied
 
 Configured --> Syncing : qied start executed
 
-Syncing --> Syncing : Polling RPC\n(catching_up = True)
+Syncing --> Syncing : Polling RPC /status\n(catching_up = True)
 
-Syncing --> Active : catching_up = False
+Syncing --> Active : catching_up = False & height > 0
 
 Active --> Syncing : Network Outage / Desync
 
@@ -1273,91 +1330,69 @@ Stopped --> Syncing : Process Restarted
 
 Stopped --> [*]
 
-Configured --> Error : Binary Failure / Missing Genesis
+Configured --> Error : Binary Failure / Invalid Config
 
 Syncing --> Error : RPC Unreachable
 
-Error --> Uninitialized : Reset Triggered\n(unsafe-reset-all)
+Error --> Uninitialized : Reset Triggered\n(tendermint unsafe-reset-all)
 ```
 
 ### 4.9 Component Diagram
-The Component Diagram models the high-level architectural building blocks of ValiGuard Al, illustrating how the software is decomposed into autonomous, replaceable modules. It defines the structural relationships and data dependencies between the major subsystems, ensuring adherence to the modularity requirement (NFR-09) so that the ML model can be swapped without altering the API or Dashboard layers.
+The Component Diagram models the high-level architectural building blocks of ValiGuard AI, illustrating how the software is decomposed into autonomous, replaceable modules. It defines the structural relationships and data dependencies between the major subsystems, ensuring adherence to the modularity requirement (NFR-09) so that the ML model can be swapped without altering the API or Dashboard layers.
 
 ```mermaid
 flowchart LR
 
-%% ==========================================
-%% External Component
-%% ==========================================
+Blockchain["External: QIE Blockchain Network<br/>(Tendermint & EVM RPC)"]
 
-Blockchain["External: QIE Blockchain Network"]
-
-%% ==========================================
-%% Orchestration Engine
-%% ==========================================
-
-subgraph Orchestration["Orchestration Engine"]
+subgraph Orchestration["Orchestration & Ingestion Engine"]
     Setup["QIESetupManager"]
     NodeMgr["QIENodeManager"]
+    Worker["IngestionWorker"]
 end
 
-%% ==========================================
-%% API Gateway
-%% ==========================================
-
-subgraph API["API Gateway"]
+subgraph API["API & Real-Time Gateway"]
     Flask["Flask REST Endpoints"]
-    Auth["API Key / JWT Auth"]
+    Socket["SocketManager (Flask-SocketIO)"]
+    Auth["Web3 EIP-191 Nonce & JWT Auth"]
 end
-
-%% ==========================================
-%% Validator Dashboard
-%% ==========================================
 
 subgraph Dashboard["Validator Dashboard"]
     NextUI["Next.js Application"]
-    WSClient["WebSocket Client"]
+    WSClient["Socket.IO & Authed Fetch Client"]
 end
-
-%% ==========================================
-%% AI Intelligence Core
-%% ==========================================
 
 subgraph AI["AI Intelligence Core"]
-    FeatExt["Feature Extraction Module"]
-    IsoForest["Isolation Forest Engine"]
+    FeatExt["FeatureExtractor (6 Features)"]
+    IsoForest["AnomalyModel (Isolation Forest)"]
 end
-
-%% ==========================================
-%% Data Persistence
-%% ==========================================
 
 subgraph Data["Data Persistence"]
-    ORM["SQLAlchemy / Alembic"]
-    DB[(PostgreSQL)]
+    ORM["SQLAlchemy ORM / Alembic"]
+    DB[("PostgreSQL / SQLite")]
 end
 
-%% ==========================================
-%% Dependencies
-%% ==========================================
+Blockchain -->|"Tendermint & EVM RPC"| NodeMgr
+Blockchain -->|"Genesis & Binary"| Setup
+NodeMgr -->|"Mempool & Block TXs"| Worker
 
-Blockchain -->|"Tendermint RPC / Genesis"| Setup
-Blockchain -->|"Raw RPC TX Data"| NodeMgr
+Setup -->|"Node Status"| Flask
+Worker -->|"Normalized TXs"| IsoForest
 
-Setup -->|"Node Status API"| Flask
-NodeMgr -->|"Normalized TX Data"| Flask
+NextUI -->|"HTTP REST API (Bearer JWT)"| Flask
+WSClient <-->|"Real-Time WebSocket Events"| Socket
 
-NextUI -->|"HTTP REST API"| Flask
-WSClient -->|"WebSocket Subscribe"| Flask
+Flask -. "JWT / API Key Verification" .-> Auth
 
-Flask -. "Token Validation" .-> Auth
+Flask -->|"Score Request"| IsoForest
+IsoForest -->|"Extract Features"| FeatExt
+FeatExt -->|"Feature Vector"| IsoForest
+IsoForest -->|"Risk Score, Tier & Reason"| Flask
 
-Flask -->|"Inference Request"| FeatExt
-FeatExt -->|"Feature Vectors"| IsoForest
-IsoForest -->|"Risk Score Callback"| Flask
-
-Flask -->|"CRUD Operations"| ORM
+Worker -->|"Persist Scored TX & Alert"| ORM
+Flask -->|"CRUD & Analytics Queries"| ORM
 ORM -->|"SQL Execution"| DB
+Worker -->|"Post-Commit Emit"| Socket
 ```
 
 ### 4.10 Deployment Diagram
@@ -1366,54 +1401,39 @@ The Deployment Diagram illustrates the physical mapping of the ValiGuard AI soft
 ```mermaid
 flowchart LR
 
-%% ==========================================
-%% Client Device
-%% ==========================================
-
-subgraph Client["Client Device (User Machine)"]
-
+subgraph Client["Client Device (Operator Machine)"]
     subgraph Browser["Web Browser"]
-        NextApp["📦 Next.js Dashboard Bundle"]
-        MetaMask["📦 MetaMask Extension"]
+        NextApp["📦 Next.js Dashboard (:3001)"]
+        MetaMask["📦 MetaMask / Web3 Wallet"]
     end
-
 end
 
-%% ==========================================
-%% Validator Host Server
-%% ==========================================
-
-subgraph Server["Validator Host Server (Ubuntu / Linux)"]
-
-    %% Python Environment
-    subgraph PythonEnv["Python 3.x Virtual Environment"]
-        Flask["📦 Flask API Server"]
-        ML["📦 Scikit-learn Engine"]
-        Scripts["📦 Orchestration Scripts"]
+subgraph Server["Validator Host Server (Linux / WSL2)"]
+    subgraph PythonEnv["Python 3.12 Virtual Environment"]
+        Flask["📦 Flask + Socket.IO Server (:5000)"]
+        Worker["📦 IngestionWorker Thread"]
+        ML["📦 Scikit-learn Isolation Forest Engine"]
+        Scripts["📦 QIESetupManager & CLI Scripts"]
     end
 
-    %% Database
-    subgraph DBEnv["Database Container / Service"]
-        Postgres[("PostgreSQL Server")]
+    subgraph DBEnv["Database Service"]
+        Postgres[("PostgreSQL (:5432) / SQLite")]
     end
 
-    %% Blockchain Runtime
     subgraph ChainEnv["Blockchain Runtime"]
-        QIE["📦 qied Binary (Tendermint Node)"]
+        QIE["📦 qied Binary (QIE Validator Node)"]
     end
-
 end
 
-%% ==========================================
-%% Communication Paths
-%% ==========================================
+NextApp <-->|"HTTP REST & WebSockets (:5000)"| Flask
+MetaMask -->|"EIP-191 Personal Sign"| NextApp
 
-NextApp -->|"HTTP / WebSockets :5000"| Flask
-MetaMask -->|"JSON-RPC"| QIE
+Flask -->|"SQLAlchemy Pool"| Postgres
+Worker -->|"SQLAlchemy Session"| Postgres
+Flask -->|"In-Process Inference"| ML
+Worker -->|"In-Process Inference"| ML
+Flask -->|"Tendermint RPC (:26657)"| QIE
+Worker -->|"Tendermint RPC (:26657) & EVM RPC (:8545)"| QIE
 
-Flask -->|"TCP/IP :5432"| Postgres
-Flask -->|"Local IPC / Import"| ML
-Flask -->|"HTTP RPC :26657"| QIE
-
-Scripts -->|"CLI / Bash Execution"| QIE
+Scripts -->|"Subprocess / CLI"| QIE
 ```

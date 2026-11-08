@@ -138,3 +138,39 @@ def test_validator_set_handles_pagination(monkeypatch):
     ]
     assert [item[1]["page"] for item in requested_pages] == [1, 2]
     assert all(item[2] == 3 for item in requested_pages)
+
+
+def test_node_probe_evm_fallback_when_tendermint_absent(monkeypatch):
+    import app as app_module
+
+    class FakeResponse:
+        def __init__(self, data):
+            self._data = data
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._data
+
+    calls = []
+
+    def fake_post(url, json=None, timeout=3):
+        calls.append((url, json))
+        if json.get("method") == "status":
+            # Gateway does not implement Tendermint status
+            return FakeResponse({"jsonrpc": "2.0", "id": 1, "result": {}})
+        if json.get("method") == "eth_blockNumber":
+            # Public EVM endpoint returns block height in hex (e.g. 0x12a05 = 76293)
+            return FakeResponse({"jsonrpc": "2.0", "id": 1, "result": "0x12a05"})
+        return FakeResponse({})
+
+    monkeypatch.setattr(app_module.requests, "post", fake_post)
+    res = app_module._probe_node_telemetry()
+
+    assert res["available"] is True
+    assert res["online"] is True
+    assert res["synced"] is True
+    assert res["block_height"] == 76293
+    assert len(calls) == 2
+

@@ -3,7 +3,7 @@ app.py
 Extended Flask REST API for ValiGuard AI with QIE blockchain integration.
 
 Features:
-- QIE node status and validation endpoints
+- QIE node status and validation endpoints (Tendermint RPC & Standard EVM RPC)
 - Bridge transaction validation and anomaly detection
 - Analytics and performance metrics
 - Authentication and rate limiting
@@ -17,7 +17,7 @@ import time
 import logging
 from datetime import datetime, timedelta
 from functools import wraps
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from collections import defaultdict
 
 # Ensure the backend/ directory is on sys.path so the `database` package
@@ -77,7 +77,7 @@ from socket_manager import SocketManager
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {
     "origins": "*",
-    "methods": ["GET", "POST", "OPTIONS"],
+    "methods": ["GET", "POST", "PATCH", "OPTIONS"],
     "allow_headers": ["Content-Type", "Authorization", "X-API-Key"],
 }})
 
@@ -268,7 +268,8 @@ anomaly_model = get_model(
 )
 logger.info(f"Anomaly model loaded: {anomaly_model.get_model_info()}")
 
-# ===== DATABASE INITIALIZATION (Phase 1 — Database Wiring) =====# Initialize a DatabaseManager at app startup. SQLite by default (file-based for
+# ===== DATABASE INITIALIZATION (Phase 1 — Database Wiring) =====
+# Initialize a DatabaseManager at app startup. SQLite by default (file-based for
 # persistence across restarts), PostgreSQL via DATABASE_URL env var.
 db_manager = DatabaseManager(DatabaseConfig())
 db_manager.init_db()
@@ -280,7 +281,6 @@ register_auth_routes(app)
 def _start_node_status_broadcaster(interval: float = 10.0) -> None:
     """Broadcast node health over the WebSocket feed every `interval` seconds."""
     import threading
-    import time as _time
 
     def _broadcast():
         while True:
@@ -305,10 +305,6 @@ def _start_node_status_broadcaster(interval: float = 10.0) -> None:
 def get_or_create_bridge(session, address: str, chain_name: str = "QIE") -> Bridge:
     """
     Get an existing Bridge by address or create a default one.
-
-    Transactions require a bridge_id FK, so we ensure a Bridge row exists
-    before attaching any Transaction to it. A default bridge is created
-    when the source chain is not explicitly registered.
 
     Args:
         session: SQLAlchemy session
@@ -349,6 +345,89 @@ def severity_enum(severity_str: str) -> SeverityLevel:
     }
     return mapping.get(severity_str, SeverityLevel.LOW)
 
+
+def _compute_bridge_analytics(session) -> Dict[str, Any]:
+    """
+    Aggregate real bridge counts and cross-chain route telemetry from the
+    Bridge and Transaction tables.
+    """
+    bridges_total = session.query(Bridge).count()
+    active_bridges = session.query(Bridge).filter(
+        Bridge.status == BridgeStatus.ACTIVE
+    ).count()
+
+    route_map: Dict[str, Dict[str, Any]] = {}
+
+    # 1. Include registered Bridge entities
+    for b in session.query(Bridge).all():
+        chain = b.chain_name or "QIE"
+        entry = route_map.setdefault(chain, {
+            "chain": chain,
+            "status": b.status.value if b.status else "active",
+            "transactions": 0,
+            "volume": 0.0,
+            "flagged": 0,
+        })
+        if b.status == BridgeStatus.ACTIVE:
+            entry["status"] = "active"
+
+    # 2. Aggregate cross-chain Transaction activity by source/destination chain
+    tx_rows = session.query(
+        Transaction.source_chain,
+        Transaction.destination_chain,
+        func.count(Transaction.id),
+        func.sum(Transaction.value),
+    ).group_by(
+        Transaction.source_chain,
+        Transaction.destination_chain,
+    ).all()
+
+    for src, dst, count, total_val in tx_rows:
+        chain_label = src if (src and src != "QIE") else (dst or src or "QIE")
+        entry = route_map.setdefault(chain_label, {
+            "chain": chain_label,
+            "status": "active",
+            "transactions": 0,
+            "volume": 0.0,
+            "flagged": 0,
+        })
+        entry["transactions"] += int(count or 0)
+        entry["volume"] = round(entry["volume"] + float(total_val or 0.0), 2)
+
+    flagged_rows = session.query(
+        Transaction.source_chain,
+        Transaction.destination_chain,
+        func.count(Transaction.id),
+    ).filter(
+        Transaction.is_flagged == True
+    ).group_by(
+        Transaction.source_chain,
+        Transaction.destination_chain,
+    ).all()
+
+    for src, dst, f_count in flagged_rows:
+        chain_label = src if (src and src != "QIE") else (dst or src or "QIE")
+        if chain_label in route_map:
+            route_map[chain_label]["flagged"] += int(f_count or 0)
+
+    bridge_routes: List[Dict[str, Any]] = sorted(
+        route_map.values(),
+        key=lambda item: (item["transactions"], item["volume"]),
+        reverse=True,
+    )
+
+    # If no explicit Bridge rows exist yet, derive active_bridges from active routes
+    effective_active_bridges = (
+        active_bridges if bridges_total > 0 else len(bridge_routes)
+    )
+
+    return {
+        "bridges_total": bridges_total,
+        "active_bridges": effective_active_bridges,
+        "bridge_routes": bridge_routes,
+    }
+
+
 # ===== HEALTH CHECK =====
 @app.route("/health", methods=["GET"])
 def health():
@@ -359,39 +438,19 @@ def health():
         "service": "valiguard-api"
     }), 200
 
-# ===== DASHBOARD ROUTE =====
+# ===== ROOT / DASHBOARD ROUTE =====
 @app.route("/", methods=["GET"])
 @app.route("/dashboard", methods=["GET"])
 @app.route("/dashboard.html", methods=["GET"])
 def serve_dashboard():
-    """Serve the dashboard HTML."""
-    try:
-        dashboard_path = os.path.join(os.path.dirname(__file__), "../frontend_legacy/dashboard.html")
-        with open(dashboard_path, "r", encoding="utf-8") as f:
-            return f.read(), 200, {"Content-Type": "text/html"}
-    except FileNotFoundError:
-        return jsonify({"error": "Dashboard not found"}), 404
-
-# ===== FRONTEND FILES =====
-@app.route("/api-client.js", methods=["GET"])
-def serve_api_client():
-    """Serve API client JavaScript."""
-    try:
-        file_path = os.path.join(os.path.dirname(__file__), "../frontend_legacy/api-client.js")
-        with open(file_path, "r") as f:
-            return f.read(), 200, {"Content-Type": "application/javascript"}
-    except FileNotFoundError:
-        return jsonify({"error": "File not found"}), 404
-
-@app.route("/dashboard.js", methods=["GET"])
-def serve_dashboard_js():
-    """Serve dashboard JavaScript."""
-    try:
-        file_path = os.path.join(os.path.dirname(__file__), "../frontend_legacy/dashboard.js")
-        with open(file_path, "r") as f:
-            return f.read(), 200, {"Content-Type": "application/javascript"}
-    except FileNotFoundError:
-        return jsonify({"error": "File not found"}), 404
+    """Redirect browser requests to the Next.js dashboard or return API info."""
+    frontend_url = os.getenv("FRONTEND_ORIGIN", "http://localhost:3001")
+    return jsonify({
+        "service": "ValiGuard AI API",
+        "status": "online",
+        "dashboard_url": frontend_url,
+        "health_url": "/health",
+    }), 200
 
 # ===== QIE NODE ENDPOINTS =====
 @app.route("/api/v1/qie/node/status", methods=["GET"])
@@ -410,6 +469,7 @@ def get_qie_node_status():
                 "height": telemetry.get("block_height", 0),
                 "syncing": not telemetry.get("synced", False),
                 "rpc_url": qie_manager.rpc_url,
+                "evm_rpc_url": getattr(qie_manager, "evm_rpc_url", "http://localhost:8545"),
                 "chain_id": qie_manager.chain_id
             },
             "response": {
@@ -427,6 +487,29 @@ def get_qie_node_status():
     except Exception as e:
         logger.error(f"Error getting QIE node status: {e}")
         return error_response(str(e), "QIE_NODE_ERROR", request_id)
+
+
+@app.route("/api/v1/qie/evm/status", methods=["GET"])
+@rate_limit
+def get_qie_evm_status():
+    """Get standard EVM JSON-RPC status and latest block height."""
+    request_id = generate_request_id()
+    try:
+        block_number = qie_manager.get_evm_block_number(timeout=2)
+        online = block_number is not None
+        data = {
+            "evm": {
+                "online": online,
+                "block_height": block_number or 0,
+                "evm_rpc_url": qie_manager.evm_rpc_url,
+                "chain_id": qie_manager.chain_id,
+            }
+        }
+        return jsonify(success_response(data, request_id)), 200
+    except Exception as e:
+        logger.error(f"Error getting QIE EVM status: {e}")
+        return error_response(str(e), "QIE_EVM_ERROR", request_id)
+
 
 @app.route("/api/v1/qie/validator/info", methods=["GET"])
 @rate_limit
@@ -551,6 +634,9 @@ def validate_cross_chain():
                     else TransactionStatus.FAILED
                 )
                 session.flush()
+                tx_dict = result["transaction"].to_dict()
+                tx_id = result["transaction"].id
+                alert_id = result["alert"].id if result.get("alert") is not None else None
         except IntegrityError:
             return error_response(
                 f"Transaction hash already exists: {validated.transaction_hash}",
@@ -562,10 +648,12 @@ def validate_cross_chain():
         anomaly_score_100 = score_result["risk_score"]
         confidence = score_result["confidence"]
         severity = score_result["severity"]
-        tx_id = result["transaction"].id
         _emit_transaction_events({
-            **result["transaction"].to_dict(),
+            **tx_dict,
+            "transaction_id": tx_id,
+            "alert_id": alert_id,
             "risk_score": anomaly_score_100,
+            "severity": severity,
             "reason": score_result.get("reason"),
         })
 
@@ -579,6 +667,7 @@ def validate_cross_chain():
             "anomaly_score": anomaly_score_100,
             "severity": severity,
             "transaction_id": tx_id,
+            "alert_id": alert_id,
             "timestamp": datetime.utcnow().isoformat()
         }
         
@@ -637,6 +726,7 @@ def get_anomaly_score():
                 "model_confidence": None,
                 "reason": normalized.get("reason"),
                 "transaction_id": transaction_id,
+                "alert_id": normalized.get("alert_id"),
                 "timestamp": datetime.utcnow().isoformat(),
             }
             logger.info(f"Anomaly score calculated and persisted: {data}")
@@ -658,6 +748,9 @@ def get_anomaly_score():
                     timestamp=datetime.utcnow(),
                     status=TransactionStatus.PENDING,
                 )
+                tx_dict = result["transaction"].to_dict()
+                tx_id = result["transaction"].id
+                alert_id = result["alert"].id if result.get("alert") is not None else None
         except IntegrityError:
             return error_response(
                 f"Transaction hash already exists: {tx_data['transaction_hash']}",
@@ -674,10 +767,12 @@ def get_anomaly_score():
         severity = score_result["severity"]
         confidence = score_result["confidence"]
         reason = score_result["reason"]
-        tx_id = result["transaction"].id
         _emit_transaction_events({
-            **result["transaction"].to_dict(),
+            **tx_dict,
+            "transaction_id": tx_id,
+            "alert_id": alert_id,
             "risk_score": anomaly_score_100,
+            "severity": severity,
             "reason": reason,
         })
         
@@ -688,6 +783,8 @@ def get_anomaly_score():
             "model_confidence": confidence,
             "reason": reason,
             "transaction_id": tx_id,
+            "alert_id": alert_id,
+            "inference_latency_ms": score_result.get("inference_latency_ms"),
             "timestamp": datetime.utcnow().isoformat()
         }
         
@@ -786,7 +883,7 @@ def send_anomaly_alert():
         
         logger.warning(f"Alert sent and persisted (alert_id={alert_id}): {alert_data}")
         
-        # TODO: Send email/webhook
+        # Send webhook if configured
         if WEBHOOK_URL:
             try:
                 requests.post(WEBHOOK_URL, json=alert_data, timeout=5)
@@ -846,11 +943,14 @@ def get_alerts():
         if from_date:
             query = query.filter(Alert.created_at >= from_date)
         if to_date:
+            # If a date-only string like YYYY-MM-DD was passed, include the full day
+            if len(request.args.get("to", "")) == 10:
+                to_date = to_date + timedelta(days=1) - timedelta(microseconds=1)
             query = query.filter(Alert.created_at <= to_date)
         if resolved_value is not None:
             query = query.filter(Alert.is_resolved == resolved_value)
         if request.args.get("tx_hash"):
-            query = query.filter(Transaction.tx_hash == request.args["tx_hash"])
+            query = query.filter(Transaction.tx_hash.ilike(f"%{request.args['tx_hash']}%"))
 
         total = query.count()
         rows = query.order_by(Alert.created_at.desc()).offset(offset).limit(limit).all()
@@ -863,9 +963,11 @@ def get_alerts():
             )
             item = alert.to_dict()
             item.update({
+                "alert_id": alert.id,
                 "tx_hash": alert.transaction.tx_hash,
                 "reason": anomaly.reason if anomaly else None,
                 "anomaly_score": anomaly.anomaly_score if anomaly else alert.transaction.anomaly_score,
+                "model_confidence": anomaly.confidence if anomaly else None,
             })
             items.append(item)
 
@@ -874,6 +976,7 @@ def get_alerts():
         "limit": limit,
         "offset": offset,
         "alerts": items,
+        "items": items,
     }, request_id)), 200
 
 
@@ -950,6 +1053,15 @@ def get_daily_stats():
         ).scalar()
         avg_anomaly_score = round(float(avg_score_result or 0), 2)
 
+        # Total volume for the day
+        daily_volume_result = session.query(Transaction).filter(
+            Transaction.timestamp >= target_date,
+            Transaction.timestamp < next_date
+        ).with_entities(
+            func.sum(Transaction.value)
+        ).scalar()
+        total_volume = round(float(daily_volume_result or 0.0), 2)
+
         # Alert counts by severity
         critical_alerts = session.query(Alert).filter(
             Alert.created_at >= target_date,
@@ -978,15 +1090,21 @@ def get_daily_stats():
             "critical": counts.get(SeverityLevel.CRITICAL, 0),
         }
 
+        bridge_analytics = _compute_bridge_analytics(session)
+
     data = {
         "date": date_str,
         "total_transactions": total_transactions,
+        "total_volume": total_volume,
         "anomalies_detected": anomalies_detected,
         "validation_success_rate": validation_success_rate,
         "avg_anomaly_score": avg_anomaly_score,
         "critical_alerts": critical_alerts,
         "high_alerts": high_alerts,
         "severity_counts": severity_counts,
+        "active_bridges": bridge_analytics["active_bridges"],
+        "bridges_total": bridge_analytics["bridges_total"],
+        "bridge_routes": bridge_analytics["bridge_routes"],
     }
 
     return jsonify(success_response(data, request_id)), 200
@@ -1031,8 +1149,9 @@ _node_telemetry_cache: Dict[str, Any] = {"data": None, "fetched_at": 0.0}
 
 def _probe_node_telemetry() -> Dict[str, Any]:
     """
-    Single fast Tendermint /status probe (plain requests, no retry adapter,
-    3s timeout). Never raises.
+    Single fast Tendermint /status probe with Standard EVM eth_blockNumber
+    fallback for Public RPC nodes (plain requests, no retry adapter, 3s timeout).
+    Never raises.
     """
     base = {
         "available": False,
@@ -1049,16 +1168,39 @@ def _probe_node_telemetry() -> Dict[str, Any]:
             timeout=3,
         )
         response.raise_for_status()
-        result = response.json().get("result", {}) or {}
+        payload = response.json() or {}
+        result = payload.get("result", {}) or {}
         sync_info = result.get("sync_info", {}) or {}
-        return {
-            **base,
-            "available": True,
-            "online": True,
-            "synced": not bool(sync_info.get("catching_up", True)),
-            "block_height": int(sync_info.get("latest_block_height", 0) or 0),
-            "moniker": (result.get("node_info", {}) or {}).get("moniker", ""),
-        }
+        if sync_info:
+            return {
+                **base,
+                "available": True,
+                "online": True,
+                "synced": not bool(sync_info.get("catching_up", True)),
+                "block_height": int(sync_info.get("latest_block_height", 0) or 0),
+                "moniker": (result.get("node_info", {}) or {}).get("moniker", ""),
+            }
+
+        # Fallback for Public EVM JSON-RPC endpoints (e.g. https://rpc1testnet.qie.digital)
+        evm_url = getattr(qie_manager, "evm_rpc_url", None) or qie_manager.rpc_url
+        evm_response = requests.post(
+            evm_url,
+            json={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []},
+            timeout=3,
+        )
+        evm_response.raise_for_status()
+        hex_height = (evm_response.json() or {}).get("result")
+        if isinstance(hex_height, str) and hex_height.startswith(("0x", "0X")):
+            height = int(hex_height, 16)
+            return {
+                **base,
+                "available": True,
+                "online": True,
+                "synced": height > 0,
+                "block_height": height,
+                "moniker": qie_manager.moniker,
+            }
+        return base
     except Exception as exc:  # noqa: BLE001 — analytics must not fail on RPC
         logger.debug(f"Node telemetry probe failed: {exc}")
         return base
@@ -1184,6 +1326,8 @@ def get_validator_stats():
                 "alerts": alert_count,
             })
 
+        bridge_analytics = _compute_bridge_analytics(session)
+
     data = {
         "total_validators": total_validators,
         "active_validators": active_validators,
@@ -1193,6 +1337,9 @@ def get_validator_stats():
         "alerts_total": alerts_total,
         "alerts_unresolved": alerts_unresolved,
         "top_validators": top_validators,
+        "active_bridges": bridge_analytics["active_bridges"],
+        "bridges_total": bridge_analytics["bridges_total"],
+        "bridge_routes": bridge_analytics["bridge_routes"],
         "node": _fetch_node_telemetry(),
     }
     return jsonify(success_response(data, request_id)), 200

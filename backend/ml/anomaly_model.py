@@ -6,6 +6,7 @@ Loads trained Isolation Forest model and provides scoring interface.
 import json
 import logging
 import os
+import time
 from datetime import datetime
 from typing import Dict, Optional, Any
 import numpy as np
@@ -148,16 +149,28 @@ class AnomalyModel:
             Dictionary containing:
                 - risk_score: 0-100 risk score (clamped)
                 - confidence: 0-100 confidence level
-                - severity: Critical/High/Medium/Low
+                - severity: critical/high/medium/low
                 - reason: Human-readable explanation
                 - model_version: Model identifier
-                - features: Feature breakdown (optional)
+                - features: Feature breakdown
+                - inference_latency_ms: Sub-100ms execution time in milliseconds
         """
+        start_perf = time.perf_counter()
+
         # Fallback scoring if model not loaded
         if self.model is None:
-            return self._fallback_score(transaction)
+            res = self._fallback_score(transaction)
+            res["inference_latency_ms"] = round((time.perf_counter() - start_perf) * 1000.0, 3)
+            return res
         
         try:
+            # Compute unclipped value spike ratio against rolling baseline
+            value_spike_ratio = (
+                self.feature_extractor.compute_value_spike_ratio(transaction)
+                if hasattr(self.feature_extractor, "compute_value_spike_ratio")
+                else None
+            )
+
             # Extract features
             features = self.feature_extractor.extract_features(transaction)
             
@@ -172,6 +185,7 @@ class AnomalyModel:
             # decision_function typically ranges from ~-0.5 to ~0.5
             # Lower scores = more anomalous
             risk_score = self._convert_to_risk_score(decision_score)
+
             # Keep the explicit value outlier signal monotonic with the
             # Isolation Forest output. A capped value feature represents a
             # transaction beyond the learned high-value baseline and must not
@@ -197,8 +211,14 @@ class AnomalyModel:
             # Determine severity
             severity = self._get_severity(risk_score)
             
-            # Generate reason
-            reason = self._generate_reason(features, risk_score, prediction)
+            # Generate reason using unclipped spike ratio when available
+            reason = self._generate_reason(
+                features,
+                risk_score,
+                prediction,
+                value_spike_ratio=value_spike_ratio,
+            )
+            inference_latency_ms = round((time.perf_counter() - start_perf) * 1000.0, 3)
             
             return {
                 "risk_score": risk_score,
@@ -206,13 +226,16 @@ class AnomalyModel:
                 "severity": severity,
                 "reason": reason,
                 "model_version": self.model_version,
-                "prediction": "anomaly" if prediction == -1 else "normal",
+                "prediction": "anomaly" if (prediction == -1 or risk_score >= 40) else "normal",
                 "features": features.tolist() if hasattr(features, "tolist") else list(features),
+                "inference_latency_ms": inference_latency_ms,
             }
             
         except Exception as e:
             logger.error(f"Error scoring transaction: {e}")
-            return self._fallback_score(transaction)
+            res = self._fallback_score(transaction)
+            res["inference_latency_ms"] = round((time.perf_counter() - start_perf) * 1000.0, 3)
+            return res
     
     def _convert_to_risk_score(self, decision_score: float) -> int:
         """
@@ -264,7 +287,8 @@ class AnomalyModel:
         self, 
         features: np.ndarray, 
         risk_score: int,
-        prediction: int
+        prediction: int,
+        value_spike_ratio: Optional[float] = None,
     ) -> str:
         """
         Generate human-readable reason for the anomaly score.
@@ -273,39 +297,46 @@ class AnomalyModel:
             features: Extracted feature vector
             risk_score: Calculated risk score
             prediction: Model prediction (1 or -1)
+            value_spike_ratio: Optional unclipped ratio of tx value vs baseline
         
         Returns:
             Human-readable reason string
         """
-        if prediction == 1:  # Normal
+        if prediction == 1 and risk_score < 40:  # Normal & below alerting threshold
             if risk_score < 20:
                 return "Transaction within normal parameters"
             else:
                 return "Slightly elevated risk indicators detected"
         
-        # Anomaly - explain why
+        # Anomaly or alerting threshold reached - explain why
         reasons = []
         
         # Feature indices from feature_extraction.py
         # [value_normalized, freq_deviation, hour_sin, hour_cos, day_sin, day_cos]
-        value_norm = features[0]
-        freq_dev = features[1]
+        value_norm = float(features[0])
+        freq_dev = float(features[1])
         
+        # Determine effective spike ratio (prefer unclipped ratio over 2.0-capped feature)
+        effective_spike = (
+            float(value_spike_ratio)
+            if (value_spike_ratio is not None and value_spike_ratio > value_norm)
+            else value_norm / max(0.5, 1.0)
+        )
+
         # Check value spike
-        if value_norm > 1.5:
-            spike_ratio = value_norm / max(0.5, 1.0)
-            reasons.append(f"{spike_ratio:.1f}x volume spike vs. baseline")
-        elif value_norm > 1.0:
+        if value_norm > 1.5 or effective_spike >= 2.0:
+            reasons.append(f"{effective_spike:.1f}x volume spike vs. baseline")
+        elif value_norm > 1.0 or effective_spike > 1.2:
             reasons.append("elevated transaction value")
         
         # Check frequency deviation
         if freq_dev > 2.0:
-            reasons.append(f"unusual transaction frequency ({freq_dev:.1f}x baseline)")
+            reasons.append(f"unusual transaction frequency ({freq_dev + 1.0:.1f}x baseline)")
         elif freq_dev > 0.5:
             reasons.append("moderately elevated activity")
         
         # Check time patterns (hour_sin, hour_cos indicate odd hours when both near 0)
-        hour_sin, hour_cos = features[2], features[3]
+        hour_sin, hour_cos = float(features[2]), float(features[3])
         # Near midnight when sin≈0 and cos≈-1
         if abs(hour_sin) < 0.3 and hour_cos < -0.7:
             reasons.append("unusual late-night timing")

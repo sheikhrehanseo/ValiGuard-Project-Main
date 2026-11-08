@@ -1,11 +1,15 @@
 """
 Isolation Forest model training script for ValiGuard AI.
-Generates synthetic transaction data, trains model, and evaluates on anomalies.
+Generates synthetic transaction data, exports the 1,600-row dataset to CSV,
+trains the Isolation Forest model, and evaluates on anomalies.
 """
 
+import csv
 import json
 import os
+import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import List, Tuple
 import numpy as np
 from dataclasses import dataclass
@@ -13,7 +17,17 @@ from sklearn.ensemble import IsolationForest
 from sklearn.metrics import precision_score, recall_score, f1_score
 import joblib
 
-from feature_extraction import FeatureExtractor
+# Support running as `python backend/ml/train_model.py` from project root
+# or `python train_model.py` from inside backend/ml/
+_CURRENT_DIR = Path(__file__).resolve().parent
+_BACKEND_DIR = _CURRENT_DIR.parent
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
+
+try:
+    from ml.feature_extraction import FeatureExtractor
+except ImportError:
+    from feature_extraction import FeatureExtractor
 
 
 @dataclass
@@ -143,6 +157,78 @@ def generate_anomaly_transactions(
         ))
     
     return transactions
+
+
+def save_training_dataset_csv(
+    normal_txs: List[MockTransaction],
+    normal_features: np.ndarray,
+    anomaly_txs: List[MockTransaction],
+    anomaly_features: np.ndarray,
+    feature_names: List[str],
+    output_dir: str = "backend/ml/models",
+) -> str:
+    """
+    Export the 1,600-row training and evaluation dataset (raw transaction fields
+    + extracted 6D feature vectors + ground-truth labels) to CSV.
+
+    Args:
+        normal_txs: List of normal MockTransaction instances (1,500 rows)
+        normal_features: Extracted feature matrix for normal transactions
+        anomaly_txs: List of anomalous MockTransaction instances (100 rows)
+        anomaly_features: Extracted feature matrix for anomalous transactions
+        feature_names: Ordered list of the 6 feature column names
+        output_dir: Directory where training_dataset.csv is written
+
+    Returns:
+        Path to the saved CSV file
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    csv_path = os.path.join(output_dir, "training_dataset.csv")
+
+    fieldnames = [
+        "row_id",
+        "timestamp",
+        "sender",
+        "value",
+        *feature_names,
+        "label",
+        "category",
+    ]
+
+    with open(csv_path, mode="w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+
+        row_id = 1
+        for tx, feat in zip(normal_txs, normal_features):
+            row = {
+                "row_id": row_id,
+                "timestamp": tx.timestamp.isoformat(),
+                "sender": tx.sender,
+                "value": round(float(tx.value), 2),
+                "label": 0,
+                "category": "normal",
+            }
+            for name, val in zip(feature_names, feat):
+                row[name] = round(float(val), 6)
+            writer.writerow(row)
+            row_id += 1
+
+        for tx, feat in zip(anomaly_txs, anomaly_features):
+            row = {
+                "row_id": row_id,
+                "timestamp": tx.timestamp.isoformat(),
+                "sender": tx.sender,
+                "value": round(float(tx.value), 2),
+                "label": 1,
+                "category": "anomaly",
+            }
+            for name, val in zip(feature_names, feat):
+                row[name] = round(float(val), 6)
+            writer.writerow(row)
+            row_id += 1
+
+    return csv_path
 
 
 def train_isolation_forest(
@@ -290,17 +376,20 @@ def main():
     print("ValiGuard AI - Isolation Forest Training")
     print("=" * 60)
     
+    # Resolve output directory relative to backend/ml/models regardless of CWD
+    default_output_dir = str(_CURRENT_DIR / "models")
+    
     # Generate data
-    print("\n[1/5] Generating synthetic normal transactions...")
+    print("\n[1/6] Generating synthetic normal transactions...")
     normal_txs = generate_normal_transactions(n_samples=1500)
     print(f"      Generated {len(normal_txs)} normal transactions")
     
-    print("\n[2/5] Generating synthetic anomalies...")
+    print("\n[2/6] Generating synthetic anomalies...")
     anomaly_txs = generate_anomaly_transactions(n_samples=100)
     print(f"      Generated {len(anomaly_txs)} anomalous transactions")
     
     # Extract features
-    print("\n[3/5] Extracting features...")
+    print("\n[3/6] Extracting features...")
     extractor = FeatureExtractor(rolling_window_hours=24, history_size=2000)
     
     normal_features = extractor.extract_batch(normal_txs)
@@ -308,18 +397,29 @@ def main():
     
     # Do NOT reset the extractor here: anomalies must be scored against the
     # normal baseline (rolling history + value percentiles) so they occupy the
-    # same feature space as the normal samples. Resetting would empty the
-    # history and force fallback log1p scaling, degrading the model boundary.
+    # same feature space as the normal samples.
     anomaly_features = extractor.extract_batch(anomaly_txs)
     print(f"      Anomaly features shape: {anomaly_features.shape}")
+
+    # Save 1,600-row dataset to CSV
+    print("\n[4/6] Exporting 1,600-row training dataset to CSV...")
+    csv_path = save_training_dataset_csv(
+        normal_txs=normal_txs,
+        normal_features=normal_features,
+        anomaly_txs=anomaly_txs,
+        anomaly_features=anomaly_features,
+        feature_names=extractor.get_feature_names(),
+        output_dir=default_output_dir,
+    )
+    print(f"      Dataset saved to: {csv_path}")
     
     # Train model
-    print("\n[4/5] Training Isolation Forest...")
+    print("\n[5/6] Training Isolation Forest...")
     model = train_isolation_forest(normal_features, contamination=0.05)
     print("      Model trained successfully")
     
     # Evaluate
-    print("\n[5/5] Evaluating model...")
+    print("\n[6/6] Evaluating model...")
     metrics = evaluate_model(model, normal_features, anomaly_features)
     
     print("\n" + "-" * 60)
@@ -336,9 +436,12 @@ def main():
     print(f"    FP: {metrics['false_positives']}  |  TN: {metrics['true_negatives']}")
     
     # Save model
-    model_path, metrics_path = save_model(model, extractor, metrics)
-    print(f"\n[OK] Model saved to: {model_path}")
-    print(f"[OK] Metrics saved to: {metrics_path}")
+    model_path, metrics_path = save_model(
+        model, extractor, metrics, output_dir=default_output_dir
+    )
+    print(f"\n[OK] Dataset CSV saved to: {csv_path}")
+    print(f"[OK] Model saved to:       {model_path}")
+    print(f"[OK] Metrics saved to:     {metrics_path}")
     
     print("\n" + "=" * 60)
     print("Training complete!")

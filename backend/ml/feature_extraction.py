@@ -4,7 +4,7 @@ Extracts feature vectors from Transaction objects for ML pipeline (FR-08).
 
 Features extracted:
 - Transaction value (normalized)
-- Frequency deviation from rolling baseline
+- Frequency deviation from rolling per-sender baseline
 - Time-of-day/temporal patterns
 """
 
@@ -18,7 +18,7 @@ class FeatureExtractor:
     """
     Extracts feature vectors from transactions for anomaly detection.
     
-    Maintains rolling baseline statistics for frequency calculations.
+    Maintains rolling baseline statistics for value and frequency calculations.
     Thread-safe for single-threaded applications.
     """
     
@@ -63,10 +63,10 @@ class FeatureExtractor:
             [value_normalized, freq_deviation, hour_sin, hour_cos,
              day_sin, day_cos]
         """
-        # Value feature
+        # Value feature (capped at 2.0 for model stability)
         value_normalized = self._extract_value_feature(transaction)
         
-        # Frequency feature
+        # Frequency feature (per-sender deviation & burst detection)
         freq_deviation = self._extract_frequency_feature(
             transaction, historical_transactions
         )
@@ -109,6 +109,42 @@ class FeatureExtractor:
                 self.extract_features(tx, historical_transactions)
             )
         return np.array(features)
+
+    def compute_value_spike_ratio(self, transaction) -> float:
+        """
+        Compute the unclipped ratio of the transaction's value relative to the
+        historical baseline prior to including the current transaction.
+
+        Used by AnomalyModel to generate accurate human-readable spike
+        explanations (e.g., '10.0x volume spike vs. baseline') while keeping
+        the ML input feature capped at 2.0.
+        """
+        if transaction.value is None:
+            return 0.0
+        value = float(transaction.value)
+        if value <= 0:
+            return 0.0
+
+        # Exclude the most recently appended value if _update_history already ran
+        history_list = list(self._value_history)
+        if history_list and history_list[-1] == value and len(history_list) > 1:
+            prior_values = [v for v in history_list[:-1] if v > 0]
+        else:
+            prior_values = [v for v in history_list if v > 0]
+
+        if not prior_values:
+            return 1.0
+
+        values_arr = np.array(prior_values, dtype=float)
+        if len(values_arr) >= 10:
+            baseline_ref = float(np.percentile(values_arr, self.normalization_percentile))
+        else:
+            baseline_ref = float(np.median(values_arr))
+
+        if baseline_ref <= 0:
+            return 1.0
+
+        return round(value / baseline_ref, 2)
     
     def _extract_value_feature(self, transaction) -> float:
         """
@@ -118,7 +154,7 @@ class FeatureExtractor:
         against outliers.
         
         Returns:
-            Normalized value in [0, ~1] range
+            Normalized value in [0, 2.0] range
         """
         # Unknown raw-entry volume is neutral for feature input only.
         if transaction.value is None:
@@ -144,15 +180,21 @@ class FeatureExtractor:
         historical_transactions: Optional[List] = None
     ) -> float:
         """
-        Calculate frequency deviation from rolling baseline.
+        Calculate frequency deviation from the rolling per-sender baseline.
         
-        Compares recent transaction rate for this sender against
-        the baseline rate.
+        Compares the sender's transaction count in the rolling window against
+        the average transaction count per unique active sender.
         
         Returns:
-            Deviation score where 0 = baseline, >0 = higher frequency
+            Deviation score in [-1.0, 10.0] where:
+              -1.0 = first-time sender in window
+               0.0 = at baseline per-sender rate (or insufficient history)
+              >0.0 = sender frequency exceeds per-sender baseline (burst/flood)
         """
         sender = transaction.sender
+        if not sender or sender == "unknown":
+            return 0.0
+
         timestamp = transaction.timestamp or datetime.utcnow()
         
         # Get relevant history
@@ -164,27 +206,32 @@ class FeatureExtractor:
         if len(history) < 5:
             return 0.0
         
-        # Calculate baseline frequency (all transactions)
         cutoff_time = timestamp - timedelta(hours=self.rolling_window_hours)
-        recent_all = sum(1 for ts, _, _ in history if ts >= cutoff_time)
-        baseline_rate = recent_all / self.rolling_window_hours  # tx/hour
-        
-        # Calculate sender frequency
-        recent_sender = sum(
-            1 for ts, s, _ in history
-            if s == sender and ts >= cutoff_time
-        )
-        sender_rate = recent_sender / self.rolling_window_hours
-        
-        # Calculate deviation
-        if baseline_rate <= 0:
+        window_entries = [
+            (ts, s) for ts, s, _ in history
+            if ts >= cutoff_time and s and s != "unknown"
+        ]
+        recent_all = len(window_entries)
+        if recent_all <= 0:
             return 0.0
-        
-        # Ratio of sender rate to baseline
-        deviation = (sender_rate / baseline_rate) - 1.0
-        
-        # Normalize to reasonable range
-        return min(max(deviation, -1.0), 10.0)
+
+        # Count how many times this sender has transacted in the window
+        recent_sender = sum(1 for _, s in window_entries if s == sender)
+        if recent_sender == 0:
+            # First time seeing this sender in the rolling window
+            return -1.0
+
+        unique_senders = max(len({s for _, s in window_entries}), 1)
+        expected_per_sender = recent_all / float(unique_senders)
+        if expected_per_sender <= 0:
+            return 0.0
+
+        # Include the current transaction in the active sender's burst count
+        sender_active_count = float(recent_sender + 1)
+        deviation = (sender_active_count / expected_per_sender) - 1.0
+
+        # Normalize to [-1.0, 10.0]
+        return float(min(max(deviation, -1.0), 10.0))
     
     def _extract_temporal_features(
         self, transaction

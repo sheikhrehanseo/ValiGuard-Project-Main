@@ -84,7 +84,7 @@ export default function Dashboard() {
     const [selectedNews, setSelectedNews] = useState(null);
 
     // Feature Toggle: REAL is the default. MOCK survives ONLY behind NEXT_PUBLIC_DEMO_MODE=true.
-    const [dataSource, setDataSource] = useState('REAL');
+    const [dataSource, setDataSource] = useState(isDemoModeEnabled ? 'MOCK' : 'REAL');
     const [walletAddress, setWalletAddress] = useState(null);
     const [backendStatus, setBackendStatus] = useState('unknown'); // 'online', 'offline', 'unknown'
 
@@ -106,6 +106,7 @@ export default function Dashboard() {
     // Daily Stats & Real Analytics
     const [dailyStats, setDailyStats] = useState(null);
     const [volumeHistory, setVolumeHistory] = useState([]);
+    const [bridgeRoutes, setBridgeRoutes] = useState([]);
     const [validatorStats, setValidatorStats] = useState({
         total_validators: null,
         active_validators: null,
@@ -174,22 +175,30 @@ export default function Dashboard() {
                 const statsData = await statsRes.json();
                 if (statsData.success) {
                     setDailyStats(statsData.data);
+                    if (Array.isArray(statsData.data.bridge_routes)) {
+                        setBridgeRoutes(statsData.data.bridge_routes);
+                    }
                     setStats(prev => ({
                         ...prev,
+                        activeBridges: statsData.data.active_bridges ?? prev.activeBridges,
                         anomalies24h: statsData.data.anomalies_detected ?? prev.anomalies24h,
                         validationRate: statsData.data.validation_success_rate ?? null
                     }));
                 }
             }
 
-            // 2. Fetch Model Accuracy
+            // 2. Fetch Model Accuracy (scale 0..1 ratio to percentage)
             const modelRes = await authedFetch('/api/v1/analytics/model-accuracy');
             if (modelRes.ok) {
                 const modelData = await modelRes.json();
                 if (modelData.success) {
+                    const rawAcc = modelData.data.accuracy;
+                    const normalizedAcc = rawAcc == null
+                        ? null
+                        : (rawAcc <= 1 ? Number((rawAcc * 100).toFixed(2)) : Number(Number(rawAcc).toFixed(2)));
                     setStats(prev => ({
                         ...prev,
-                        modelAccuracy: modelData.data.accuracy ?? null,
+                        modelAccuracy: normalizedAcc,
                     }));
                 }
             }
@@ -200,9 +209,12 @@ export default function Dashboard() {
                 const valData = await valRes.json();
                 if (valData.success) {
                     setValidatorStats(valData.data);
+                    if (Array.isArray(valData.data.bridge_routes) && valData.data.bridge_routes.length > 0) {
+                        setBridgeRoutes(valData.data.bridge_routes);
+                    }
                     setStats(prev => ({
                         ...prev,
-                        activeBridges: valData.data.active_validators ?? prev.activeBridges
+                        activeBridges: valData.data.active_bridges ?? prev.activeBridges ?? valData.data.active_validators
                     }));
                 }
             }
@@ -250,7 +262,8 @@ export default function Dashboard() {
                 return {
                     date: dateStr.slice(5),
                     fullDate: dateStr,
-                    count: (res.success && res.data?.total_transactions) ? res.data.total_transactions : 0
+                    count: (res.success && res.data?.total_transactions) ? res.data.total_transactions : 0,
+                    volume: (res.success && res.data?.total_volume) ? res.data.total_volume : 0
                 };
             });
             setVolumeHistory(history);
@@ -279,8 +292,9 @@ export default function Dashboard() {
             const res = await authedFetch(`/api/v1/alerts?${params.toString()}`);
             if (res.ok) {
                 const data = await res.json();
-                if (data.success && Array.isArray(data.data.items)) {
-                    setAlertHistory(data.data.items);
+                const items = data.data?.alerts ?? data.data?.items;
+                if (data.success && Array.isArray(items)) {
+                    setAlertHistory(items);
                 }
             }
         } catch (error) {
@@ -292,11 +306,17 @@ export default function Dashboard() {
 
     // Handle Alert Resolution
     const handleResolveAlert = async (alertId) => {
+        if (!alertId) return;
+        if (dataSource === 'MOCK') {
+            setLiveAlerts(prev => prev.map(a => (a.id === alertId || a.alert_id === alertId) ? { ...a, is_resolved: true } : a));
+            setAlertHistory(prev => prev.map(a => (a.id === alertId || a.alert_id === alertId) ? { ...a, is_resolved: true } : a));
+            return;
+        }
         try {
             const res = await authedFetch(`/api/v1/alerts/${alertId}/resolve`, { method: 'PATCH' });
             if (res.ok) {
-                setLiveAlerts(prev => prev.map(a => a.id === alertId ? { ...a, is_resolved: true } : a));
-                setAlertHistory(prev => prev.map(a => a.id === alertId ? { ...a, is_resolved: true } : a));
+                setLiveAlerts(prev => prev.map(a => (a.id === alertId || a.alert_id === alertId) ? { ...a, is_resolved: true } : a));
+                setAlertHistory(prev => prev.map(a => (a.id === alertId || a.alert_id === alertId) ? { ...a, is_resolved: true } : a));
             }
         } catch (err) {
             console.error("Failed to resolve alert:", err);
@@ -320,7 +340,7 @@ export default function Dashboard() {
                 activeBridges: 4,
                 anomalies24h: 1,
                 validationRate: 98.5,
-                modelAccuracy: 94.2
+                modelAccuracy: 95.12
             });
             setDailyStats({
                 total_transactions: 1420,
@@ -331,25 +351,71 @@ export default function Dashboard() {
                 severity_counts: { low: 950, medium: 340, high: 120, critical: 10 }
             });
             setVolumeHistory([
-                { date: '10-06', fullDate: '2026-10-06', count: 180 },
-                { date: '10-07', fullDate: '2026-10-07', count: 210 },
-                { date: '10-08', fullDate: '2026-10-08', count: 195 },
-                { date: '10-09', fullDate: '2026-10-09', count: 240 },
-                { date: '10-10', fullDate: '2026-10-10', count: 220 },
-                { date: '10-11', fullDate: '2026-10-11', count: 265 },
-                { date: '10-12', fullDate: '2026-10-12', count: 310 }
+                { date: '10-06', fullDate: '2026-10-06', count: 180, volume: 24500 },
+                { date: '10-07', fullDate: '2026-10-07', count: 210, volume: 31200 },
+                { date: '10-08', fullDate: '2026-10-08', count: 195, volume: 28900 },
+                { date: '10-09', fullDate: '2026-10-09', count: 240, volume: 42100 },
+                { date: '10-10', fullDate: '2026-10-10', count: 220, volume: 36800 },
+                { date: '10-11', fullDate: '2026-10-11', count: 265, volume: 48400 },
+                { date: '10-12', fullDate: '2026-10-12', count: 310, volume: 55900 }
+            ]);
+            setBridgeRoutes([
+                { chain: 'Ethereum', status: 'active', transactions: 620, volume: 145200.5, flagged: 1 },
+                { chain: 'BSC', status: 'active', transactions: 410, volume: 68400.0, flagged: 0 },
+                { chain: 'Polygon', status: 'active', transactions: 290, volume: 41200.0, flagged: 0 },
+                { chain: 'Avalanche', status: 'active', transactions: 100, volume: 13000.0, flagged: 0 }
             ]);
             setValidatorStats({
                 total_validators: 4,
                 active_validators: 4,
                 avg_uptime: 99.8,
                 top_validators: [
-                    { address: 'qie1valoper1...89a', voting_power: '450,000', uptime: '99.9%', status: 'Active', transactions: 520, alerts: 0 },
-                    { address: 'qie1valoper2...bc4', voting_power: '320,000', uptime: '99.8%', status: 'Active', transactions: 410, alerts: 1 },
-                    { address: 'qie1valoper3...3ef', voting_power: '280,000', uptime: '99.7%', status: 'Active', transactions: 340, alerts: 0 },
-                    { address: 'qie1valoper4...0d1', voting_power: '150,000', uptime: '99.5%', status: 'Active', transactions: 150, alerts: 0 },
+                    { address: 'qie1valoper1...89a', voting_power: '450,000', uptime: '99.9%', is_active: true, transactions: 520, alerts: 0 },
+                    { address: 'qie1valoper2...bc4', voting_power: '320,000', uptime: '99.8%', is_active: true, transactions: 410, alerts: 1 },
+                    { address: 'qie1valoper3...3ef', voting_power: '280,000', uptime: '99.7%', is_active: true, transactions: 340, alerts: 0 },
+                    { address: 'qie1valoper4...0d1', voting_power: '150,000', uptime: '99.5%', is_active: true, transactions: 150, alerts: 0 },
                 ]
             });
+            const demoAlerts = [
+                {
+                    id: 901,
+                    alert_id: 901,
+                    tx_hash: '0x9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c',
+                    severity: 'critical',
+                    anomaly_score: 92.4,
+                    model_confidence: 96,
+                    reason: '12.4x volume spike vs. baseline; off-hours activity (early morning)',
+                    message: 'Anomaly score 92.40 (critical): 12.4x volume spike vs. baseline',
+                    is_resolved: false,
+                    timestamp: new Date(Date.now() - 120000).toISOString()
+                },
+                {
+                    id: 902,
+                    alert_id: 902,
+                    tx_hash: '0x8b4c2e1f9a0b1c2d3e4f5a6b7c8d9e0f',
+                    severity: 'high',
+                    anomaly_score: 74.5,
+                    model_confidence: 89,
+                    reason: 'unusual transaction frequency (4.2x baseline)',
+                    message: 'Anomaly score 74.50 (high): unusual transaction frequency (4.2x baseline)',
+                    is_resolved: false,
+                    timestamp: new Date(Date.now() - 360000).toISOString()
+                },
+                {
+                    id: 903,
+                    alert_id: 903,
+                    tx_hash: '0x4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a',
+                    severity: 'medium',
+                    anomaly_score: 48.0,
+                    model_confidence: 78,
+                    reason: 'elevated transaction value',
+                    message: 'Anomaly score 48.00 (medium): elevated transaction value',
+                    is_resolved: true,
+                    timestamp: new Date(Date.now() - 900000).toISOString()
+                }
+            ];
+            setLiveAlerts(prev => prev.length > 0 ? prev : demoAlerts.filter(a => !a.is_resolved));
+            setAlertHistory(prev => prev.length > 0 ? prev : demoAlerts);
             setTransactions(prev => prev.length > 0 ? prev : [
                 {
                     hash: '0x3a9f1b2c...',
@@ -467,18 +533,29 @@ export default function Dashboard() {
         });
 
         socket.on('new_alert', (alert) => {
-            setLiveAlerts(prev => [{
+            const incoming = {
                 ...alert,
+                id: alert.id ?? alert.alert_id,
+                alert_id: alert.alert_id ?? alert.id,
                 timestamp: alert.timestamp || alert.created_at,
-            }, ...prev].slice(0, 20));
+            };
+            setLiveAlerts(prev => [incoming, ...prev].slice(0, 20));
+            setAlertHistory(prev => {
+                if (prev.some(item => (item.id && item.id === incoming.id) || (item.tx_hash && item.tx_hash === incoming.tx_hash))) {
+                    return prev;
+                }
+                return [incoming, ...prev].slice(0, 50);
+            });
         });
 
         socket.on('alert_resolved', (resolved) => {
             setLiveAlerts(prev => prev.filter(alert => (
-                alert.id !== resolved.alert_id && alert.tx_hash !== resolved.tx_hash
+                alert.id !== resolved.alert_id && alert.alert_id !== resolved.alert_id && alert.tx_hash !== resolved.tx_hash
             )));
             setAlertHistory(prev => prev.map(alert => (
-                alert.id === resolved.alert_id ? { ...alert, is_resolved: true } : alert
+                (alert.id === resolved.alert_id || alert.alert_id === resolved.alert_id)
+                    ? { ...alert, is_resolved: true }
+                    : alert
             )));
         });
 
@@ -1069,7 +1146,7 @@ export default function Dashboard() {
                                 </motion.div>
                             )}
 
-                            {/* ALERTS TAB & AUDIT SEARCH UI (Step 9) */}
+                            {/* ALERTS TAB & AUDIT SEARCH UI */}
                             {activeSection === 'alerts' && (
                                 <motion.div
                                     key="alerts"
@@ -1087,7 +1164,7 @@ export default function Dashboard() {
                                             <span className="text-xs text-slate-400 font-mono">GET /api/v1/alerts</span>
                                         </div>
 
-                                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
                                             {/* Severity Filter */}
                                             <div>
                                                 <label className="text-xs text-slate-400 block mb-1">Severity</label>
@@ -1118,15 +1195,37 @@ export default function Dashboard() {
                                                 </select>
                                             </div>
 
+                                            {/* From Date Filter */}
+                                            <div>
+                                                <label className="text-xs text-slate-400 block mb-1">From Date</label>
+                                                <input
+                                                    type="date"
+                                                    value={alertFilterFrom}
+                                                    onChange={e => setAlertFilterFrom(e.target.value)}
+                                                    className="w-full bg-slate-900 border border-slate-700 rounded-lg text-sm text-slate-200 px-3 py-2 outline-none focus:border-blue-500"
+                                                />
+                                            </div>
+
+                                            {/* To Date Filter */}
+                                            <div>
+                                                <label className="text-xs text-slate-400 block mb-1">To Date</label>
+                                                <input
+                                                    type="date"
+                                                    value={alertFilterTo}
+                                                    onChange={e => setAlertFilterTo(e.target.value)}
+                                                    className="w-full bg-slate-900 border border-slate-700 rounded-lg text-sm text-slate-200 px-3 py-2 outline-none focus:border-blue-500"
+                                                />
+                                            </div>
+
                                             {/* Tx Hash Filter */}
-                                            <div className="lg:col-span-2">
+                                            <div>
                                                 <label className="text-xs text-slate-400 block mb-1">Transaction Hash</label>
                                                 <div className="relative">
                                                     <input
                                                         type="text"
                                                         value={alertFilterTxHash}
                                                         onChange={e => setAlertFilterTxHash(e.target.value)}
-                                                        placeholder="Filter by tx hash..."
+                                                        placeholder="0x..."
                                                         className="w-full bg-slate-900 border border-slate-700 rounded-lg text-sm text-slate-200 px-3 py-2 pl-8 outline-none focus:border-blue-500 font-mono"
                                                     />
                                                     <Search className="w-4 h-4 text-slate-500 absolute left-2.5 top-2.5" />
@@ -1186,10 +1285,11 @@ export default function Dashboard() {
                                                 const style = SEVERITY_STYLES[sev] || SEVERITY_STYLES.low;
                                                 const Icon = style.icon;
                                                 const isResolved = !!alert.is_resolved;
+                                                const alertId = alert.id ?? alert.alert_id;
 
                                                 return (
                                                     <div
-                                                        key={alert.id || alert.tx_hash || i}
+                                                        key={alertId || alert.tx_hash || i}
                                                         className={`${style.bg} ${style.border} border p-5 rounded-2xl flex flex-col md:flex-row md:items-center justify-between gap-4 transition-all`}
                                                     >
                                                         <div className="flex items-start gap-4">
@@ -1212,7 +1312,7 @@ export default function Dashboard() {
                                                                     )}
                                                                 </div>
 
-                                                                {/* Reasoning Display (page.js:827-834 contract preserved) */}
+                                                                {/* Reasoning Display */}
                                                                 <p className="text-slate-200 text-sm mt-1">{alert.message || alert.reason || 'Flagged by ML model'}</p>
 
                                                                 {alert.reason && alert.reason !== alert.message && (
@@ -1238,10 +1338,10 @@ export default function Dashboard() {
                                                         </div>
 
                                                         {/* Resolution Button */}
-                                                        {alert.id && !isResolved && (
+                                                        {alertId && !isResolved && (
                                                             <div className="md:self-center shrink-0">
                                                                 <button
-                                                                    onClick={() => handleResolveAlert(alert.id)}
+                                                                    onClick={() => handleResolveAlert(alertId)}
                                                                     className="bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-emerald-500/30 text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5"
                                                                 >
                                                                     <CheckCircle className="w-3.5 h-3.5" /> Mark Resolved
@@ -1356,24 +1456,46 @@ export default function Dashboard() {
                                         </div>
                                     </div>
 
-                                    {/* Cross-Chain Bridge Breakdown */}
+                                    {/* Cross-Chain Bridge Breakdown (Real Database Queries) */}
                                     <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700">
-                                        <h3 className="text-lg font-bold mb-4 text-white">Cross-Chain Bridge Routes</h3>
-                                        <div className="space-y-4">
-                                            {['Ethereum', 'BSC', 'Polygon', 'Avalanche'].map((chain, i) => (
-                                                <div key={chain} className="flex items-center justify-between border-b border-slate-700/50 pb-3">
-                                                    <div className="flex items-center gap-3">
-                                                        <div className={`w-3 h-3 rounded-full ${['bg-blue-500', 'bg-yellow-500', 'bg-purple-500', 'bg-red-500'][i]}`}></div>
-                                                        <span className="text-slate-300 font-medium">{chain}</span>
-                                                    </div>
-                                                    <div className="text-right">
-                                                        <span className="px-2 py-1 rounded bg-slate-900 border border-slate-700 text-xs font-mono text-slate-300">
-                                                            Route Active
-                                                        </span>
-                                                    </div>
-                                                </div>
-                                            ))}
+                                        <div className="flex justify-between items-center mb-4">
+                                            <h3 className="text-lg font-bold text-white">Cross-Chain Bridge Routes</h3>
+                                            <span className="text-xs text-slate-400 font-mono">Bridge & Transaction Telemetry</span>
                                         </div>
+                                        {!isAuthed ? (
+                                            <div className="p-6 text-center text-slate-400 text-sm">
+                                                Connect wallet to view active bridge routes and liquidity volume.
+                                            </div>
+                                        ) : bridgeRoutes.length === 0 ? (
+                                            <div className="p-6 text-center text-slate-500 text-sm">
+                                                No bridge routes recorded yet. Routes will populate as cross-chain transactions are ingested.
+                                            </div>
+                                        ) : (
+                                            <div className="space-y-4">
+                                                {bridgeRoutes.map((route, i) => (
+                                                    <div key={route.chain || i} className="flex items-center justify-between border-b border-slate-700/50 pb-3">
+                                                        <div className="flex items-center gap-3">
+                                                            <div className={`w-3 h-3 rounded-full ${['bg-blue-500', 'bg-yellow-500', 'bg-purple-500', 'bg-emerald-500', 'bg-red-500'][i % 5]}`}></div>
+                                                            <div>
+                                                                <span className="text-slate-200 font-medium">{route.chain}</span>
+                                                                <div className="text-xs text-slate-500">
+                                                                    {route.transactions ?? 0} txs • {Number(route.volume || 0).toLocaleString()} QIE volume
+                                                                    {route.flagged > 0 ? ` • ${route.flagged} flagged` : ''}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                        <div className="text-right">
+                                                            <span className={`px-2 py-1 rounded border text-xs font-mono uppercase ${route.status === 'active'
+                                                                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                                                                    : 'bg-slate-900 border-slate-700 text-slate-400'
+                                                                }`}>
+                                                                {route.status === 'active' ? 'Route Active' : route.status}
+                                                            </span>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
                                     </div>
                                 </motion.div>
                             )}

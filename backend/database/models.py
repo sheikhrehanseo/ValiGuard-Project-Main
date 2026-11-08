@@ -11,6 +11,8 @@ from sqlalchemy.orm import relationship
 import enum
 import json
 
+from core.severity import severity_from_score
+
 Base = declarative_base()
 
 
@@ -185,6 +187,11 @@ class Transaction(Base):
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
             "status": self.status.value if self.status else None,
             "anomaly_score": self.anomaly_score,
+            "severity": (
+                severity_from_score(self.anomaly_score)
+                if self.anomaly_score is not None
+                else None
+            ),
             "is_flagged": self.is_flagged,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
