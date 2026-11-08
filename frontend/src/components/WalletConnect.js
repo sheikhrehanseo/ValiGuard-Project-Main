@@ -1,12 +1,21 @@
 "use client";
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { ethers } from 'ethers';
 import { User, Wallet, ShieldCheck } from 'lucide-react';
-import { authenticateWallet, getDemoWallet, setWalletContext, clearWalletContext } from '../lib/api';
+import {
+    authenticateWallet,
+    getDemoWallet,
+    setWalletContext,
+    clearWalletContext,
+    getToken,
+    setToken,
+    isAuthenticated
+} from '../lib/api';
 
 // Demo (no-MetaMask) fallback only when explicitly enabled at build time.
 const DEMO_MODE = process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
 
 export default function WalletConnect({ onConnect }) {
     const [walletAddress, setWalletAddress] = useState(null);
@@ -16,6 +25,9 @@ export default function WalletConnect({ onConnect }) {
     const [error, setError] = useState(null);
     const [authError, setAuthError] = useState(null);
     const [isDemo, setIsDemo] = useState(false);
+
+    const isAuthenticatingRef = useRef(false);
+    const isConnectingRef = useRef(false);
 
     // Auto-connect if permission already granted
     useEffect(() => {
@@ -30,38 +42,75 @@ export default function WalletConnect({ onConnect }) {
             if (typeof window !== 'undefined' && window.ethereum) {
                 window.ethereum.removeListener('accountsChanged', handleAccountsChanged);
             }
-        }
+        };
     }, []);
 
     const signInWithBackend = async (address, signMessage) => {
-        // Web3 login (UC-01): nonce -> signature -> JWT stored by api client
+        // Guard against duplicate / concurrent calls
+        if (isAuthenticatingRef.current) return false;
+        isAuthenticatingRef.current = true;
         setIsAuthenticating(true);
         try {
             await authenticateWallet(address, signMessage);
             // Register for transparent 401 re-auth in authedFetch.
             setWalletContext({ address, signMessage });
             setAuthError(null);
+            return true;
         } catch (err) {
             console.error('Backend sign-in failed:', err);
             setAuthError(err.message || 'Authentication failed');
+            return false;
         } finally {
             setIsAuthenticating(false);
+            isAuthenticatingRef.current = false;
         }
     };
 
     const handleAccountsChanged = async (accounts) => {
-        if (accounts.length > 0) {
+        if (accounts && accounts.length > 0) {
             const address = accounts[0];
-            setWalletAddress(address);
-            if (onConnect) onConnect(address);
             fetchBalance(address);
-            // Sign in to the ValiGuard API with the connected wallet.
-            const provider = new ethers.BrowserProvider(window.ethereum);
-            const signer = await provider.getSigner();
-            await signInWithBackend(address, (msg) => signer.signMessage(msg));
+
+            if (typeof window !== 'undefined' && window.ethereum) {
+                const provider = new ethers.BrowserProvider(window.ethereum);
+                const signer = await provider.getSigner();
+                const signMessage = (msg) => signer.signMessage(msg);
+                setWalletContext({ address, signMessage });
+
+                // Check if existing token in localStorage is already valid for this address
+                let authed = false;
+                const token = getToken();
+                if (token) {
+                    try {
+                        const meRes = await fetch(`${API_BASE}/api/v1/auth/me`, {
+                            headers: { Authorization: `Bearer ${token}` }
+                        });
+                        if (meRes.ok) {
+                            const meData = await meRes.json();
+                            if (meData.success && meData.data?.address?.toLowerCase() === address.toLowerCase()) {
+                                authed = true;
+                            }
+                        }
+                    } catch (e) {
+                        // ignore network issue, proceed to sign in
+                    }
+                }
+
+                if (!authed) {
+                    authed = await signInWithBackend(address, signMessage);
+                }
+
+                if (authed) {
+                    setWalletAddress(address);
+                    setAuthError(null);
+                    if (onConnect) onConnect(address);
+                }
+            }
         } else {
             setWalletAddress(null);
             setBalance(null);
+            setToken(null);
+            clearWalletContext();
             if (onConnect) onConnect(null);
         }
     };
@@ -79,49 +128,50 @@ export default function WalletConnect({ onConnect }) {
     };
 
     const connectWallet = async () => {
+        if (isConnectingRef.current) return;
+        isConnectingRef.current = true;
         setIsConnecting(true);
         setError(null);
+        setAuthError(null);
 
-        if (typeof window !== 'undefined' && window.ethereum) {
-            try {
+        try {
+            if (typeof window !== 'undefined' && window.ethereum) {
                 const provider = new ethers.BrowserProvider(window.ethereum);
                 const accounts = await provider.send("eth_requestAccounts", []);
-                handleAccountsChanged(accounts);
-            } catch (err) {
-                console.warn("Wallet connection failed:", err);
-                if (err.code === 4001) {
-                    setError("Connection rejected");
-                } else {
-                    setError("Connection failed");
-                }
-            }
-        } else if (DEMO_MODE) {
-            // Demo mode (NEXT_PUBLIC_DEMO_MODE=true): no MetaMask — sign in
-            // with a persisted ephemeral wallet.
-            console.log("MetaMask unavailable. Using Demo Wallet with backend auth.");
-            setTimeout(async () => {
-                try {
-                    const demoWallet = await getDemoWallet();
+                await handleAccountsChanged(accounts);
+            } else if (DEMO_MODE) {
+                console.log("MetaMask unavailable. Using Demo Wallet with backend auth.");
+                const demoWallet = await getDemoWallet();
+                const signMessage = (msg) => demoWallet.signMessage(msg);
+                setWalletContext({ address: demoWallet.address, signMessage });
+                setBalance("1,000.00");
+                const ok = await signInWithBackend(demoWallet.address, signMessage);
+                if (ok) {
                     setWalletAddress(demoWallet.address);
                     setIsDemo(true);
-                    setBalance("1,000.00");
                     if (onConnect) onConnect(demoWallet.address);
-                    await signInWithBackend(demoWallet.address, (msg) => demoWallet.signMessage(msg));
-                } catch (err) {
-                    console.error("Demo sign-in failed:", err);
-                    setError("Demo authentication failed");
                 }
-            }, 500);
-        } else {
-            setError("No wallet found. Install MetaMask or set NEXT_PUBLIC_DEMO_MODE=true.");
+            } else {
+                setError("No wallet found. Install MetaMask or set NEXT_PUBLIC_DEMO_MODE=true.");
+            }
+        } catch (err) {
+            console.warn("Wallet connection failed:", err);
+            if (err.code === 4001) {
+                setError("Connection rejected");
+            } else {
+                setError("Connection failed");
+            }
+        } finally {
+            setIsConnecting(false);
+            isConnectingRef.current = false;
         }
-        setIsConnecting(false);
     };
 
     const disconnectWallet = () => {
         setWalletAddress(null);
         setBalance(null);
         setIsDemo(false);
+        setToken(null);
         clearWalletContext();
         if (onConnect) onConnect(null);
     };
@@ -135,7 +185,7 @@ export default function WalletConnect({ onConnect }) {
                     ? 'bg-slate-700 text-green-400 border border-green-500/30'
                     : 'bg-gradient-to-r from-blue-600 to-purple-600 text-white hover:opacity-90'
                     }`}
-                disabled={isConnecting}
+                disabled={isConnecting || isAuthenticating}
             >
                 {walletAddress ? (
                     <>
@@ -146,7 +196,7 @@ export default function WalletConnect({ onConnect }) {
                 ) : (
                     <>
                         <Wallet className="w-4 h-4" />
-                        {isConnecting ? 'Connecting...' : 'Connect Wallet'}
+                        {isConnecting || isAuthenticating ? 'Connecting...' : 'Connect Wallet'}
                     </>
                 )}
             </button>

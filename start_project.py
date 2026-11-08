@@ -118,8 +118,8 @@ def load_dotenv(path: Path = ROOT / ".env") -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Start the ValiGuard local stack")
-    parser.add_argument("--demo", action="store_true", help="disable QIE ingestion")
-    parser.add_argument("--simulate", action="store_true", help="run HTTP traffic simulator")
+    parser.add_argument("--demo", action="store_true", help="run in demo/mock mode without QIE ingestion")
+    parser.add_argument("--simulate", action="store_true", help="run HTTP traffic simulator (restricted to --demo mode)")
     parser.add_argument("--no-browser", action="store_true")
     return parser
 
@@ -130,9 +130,9 @@ def configure_environment(demo: bool, base: Optional[Dict[str, str]] = None) -> 
         environment["VALIGUARD_INGESTION_WORKER"] = "0"
         environment["NEXT_PUBLIC_DEMO_MODE"] = "true"
     else:
-        environment.setdefault("VALIGUARD_INGESTION_WORKER", "1")
+        environment["VALIGUARD_INGESTION_WORKER"] = "1"
         environment.setdefault("MEMPOOL_ENABLED", "1")
-        environment.setdefault("NEXT_PUBLIC_DEMO_MODE", "false")
+        environment["NEXT_PUBLIC_DEMO_MODE"] = "false"
     return environment
 
 
@@ -250,18 +250,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         wait_for_http(f"{BACKEND_URL}/health", 30, "backend")
         processes.append(spawn([npm, "run", "dev"], ROOT / "frontend", env, "frontend"))
         wait_for_http(FRONTEND_URL, 45, "frontend")
-        if args.simulate:
+        if args.demo and args.simulate:
             processes.append(spawn(
                 [str(python_exe), "scripts/generate_mock_traffic.py", "--api-url", BACKEND_URL],
                 ROOT,
                 env,
                 "traffic simulator",
             ))
+        elif args.simulate and not args.demo:
+            print("[*] Note: Traffic simulator is restricted to Mock Mode (--demo). Real Mode uses live blockchain ingestion only.")
         print("\nValiGuard is running")
         print(f"  Dashboard: {FRONTEND_URL}")
         print(f"  API:       {BACKEND_URL}")
         print(f"  Health:    {BACKEND_URL}/health")
-        print(f"  Mode:      {'demo (no QIE node — node status shows offline honestly)' if args.demo else 'QIE (worker + mempool enabled)'}{' + traffic simulator' if args.simulate else ''}")
+        print(f"  Mode:      {'demo (mock data)' if args.demo else 'QIE Real Mode (live worker + mempool enabled)'}{' + traffic simulator' if (args.demo and args.simulate) else ''}")
         if not args.no_browser:
             import webbrowser
             webbrowser.open(FRONTEND_URL)

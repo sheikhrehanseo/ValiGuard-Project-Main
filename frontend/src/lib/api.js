@@ -129,18 +129,33 @@ export async function verifySignature(address, nonce, signature) {
     return body.data; // { token, token_type, expires_in, address }
 }
 
+let authInFlight = null;
+
 /**
  * Full sign-in flow for a connected wallet.
+ * Deduplicated so concurrent calls share a single request-nonce -> sign -> verify cycle.
  * @param {string} address  Wallet address
  * @param {function(string): Promise<string>} signMessage  signer.signMessage
  * @returns {Promise<string>} the stored JWT
  */
 export async function authenticateWallet(address, signMessage) {
-    const { nonce, message } = await requestNonce(address);
-    const signature = await signMessage(message);
-    const data = await verifySignature(address, nonce, signature);
-    setToken(data.token);
-    return data.token;
+    if (authInFlight) {
+        return authInFlight;
+    }
+
+    authInFlight = (async () => {
+        try {
+            const { nonce, message } = await requestNonce(address);
+            const signature = await signMessage(message);
+            const data = await verifySignature(address, nonce, signature);
+            setToken(data.token);
+            return data.token;
+        } finally {
+            authInFlight = null;
+        }
+    })();
+
+    return authInFlight;
 }
 
 // --- Demo (no-MetaMask) wallet ----------------------------------------------
