@@ -208,9 +208,10 @@ export default function Dashboard() {
             setBackendStatus('online');
 
             // 1. Fetch Daily Stats
+            let statsData = null;
             const statsRes = await authedFetch('/api/v1/analytics/daily-stats');
             if (statsRes.ok) {
-                const statsData = await statsRes.json();
+                statsData = await statsRes.json();
                 if (statsData.success && statsData.data) {
                     setDailyStats(statsData.data);
                     if (Array.isArray(statsData.data.bridge_routes)) {
@@ -281,36 +282,51 @@ export default function Dashboard() {
                 }
             }
 
-            // 5. Fetch Volume History for Traffic Chart (last 7 days)
-            const dates = [];
-            for (let i = 6; i >= 0; i--) {
-                const d = new Date();
-                d.setUTCDate(d.getUTCDate() - i);
-                dates.push(d.toISOString().slice(0, 10));
-            }
-            const dailyResponses = await Promise.all(
-                dates.map(dateStr =>
-                    authedFetch(`/api/v1/analytics/daily-stats?date=${dateStr}`)
-                        .then(r => r.ok ? r.json() : { success: false })
-                        .catch(() => ({ success: false }))
-                )
-            );
-            const history = dates.map((dateStr, idx) => {
-                const res = dailyResponses[idx];
-                return {
-                    date: dateStr.slice(5),
-                    fullDate: dateStr,
-                    count: (res.success && res.data?.total_transactions) ? res.data.total_transactions : 0,
-                    volume: (res.success && res.data?.total_volume) ? res.data.total_volume : 0
-                };
+            // 5. Fetch Volume History for Traffic Chart (last 7 days — fetched once, then today's bar updated live)
+            setVolumeHistory(prev => {
+                if (prev.length === 7 && statsData?.success && statsData?.data) {
+                    const updated = [...prev];
+                    updated[6] = {
+                        ...updated[6],
+                        count: statsData.data.total_transactions ?? updated[6].count,
+                        volume: statsData.data.total_volume ?? updated[6].volume,
+                    };
+                    return updated;
+                }
+                return prev;
             });
-            setVolumeHistory(history);
+
+            if (volumeHistory.length === 0) {
+                const dates = [];
+                for (let i = 6; i >= 0; i--) {
+                    const d = new Date();
+                    d.setUTCDate(d.getUTCDate() - i);
+                    dates.push(d.toISOString().slice(0, 10));
+                }
+                const dailyResponses = await Promise.all(
+                    dates.map(dateStr =>
+                        authedFetch(`/api/v1/analytics/daily-stats?date=${dateStr}`)
+                            .then(r => r.ok ? r.json() : { success: false })
+                            .catch(() => ({ success: false }))
+                    )
+                );
+                const history = dates.map((dateStr, idx) => {
+                    const res = dailyResponses[idx];
+                    return {
+                        date: dateStr.slice(5),
+                        fullDate: dateStr,
+                        count: (res.success && res.data?.total_transactions) ? res.data.total_transactions : 0,
+                        volume: (res.success && res.data?.total_volume) ? res.data.total_volume : 0
+                    };
+                });
+                setVolumeHistory(history);
+            }
 
         } catch (error) {
             console.error("Protected telemetry fetch error:", error);
             // Telemetry aggregation warning does not mark the entire backend API as offline
         }
-    }, [walletAddress]);
+    }, [walletAddress, volumeHistory.length]);
 
     // Fetch Alerts with filter criteria
     const fetchFilteredAlerts = useCallback(async () => {

@@ -66,7 +66,7 @@ class DatabaseConfig:
         # Default to SQLite in development
         db_path = os.path.join(os.path.dirname(__file__), "..", "..", "valiguard.db")
         return f"sqlite:///{db_path}"
-    
+
     def get_engine(self):
         """Create and return SQLAlchemy engine."""
         engine_kwargs = {
@@ -76,8 +76,16 @@ class DatabaseConfig:
         
         if self.is_sqlite:
             # SQLite-specific configuration
-            engine_kwargs["connect_args"] = {"check_same_thread": False}
-            engine_kwargs["poolclass"] = StaticPool
+            engine_kwargs["connect_args"] = {
+                "check_same_thread": False,
+                "timeout": 30,
+            }
+            # Only use StaticPool for in-memory SQLite databases; file-based
+            # SQLite must give each concurrent thread its own connection.
+            if ":memory:" in self.db_url or self.db_url.endswith("sqlite://"):
+                engine_kwargs["poolclass"] = StaticPool
+            else:
+                engine_kwargs["pool_pre_ping"] = True
         else:
             # PostgreSQL connection pooling
             engine_kwargs["pool_size"] = 20
@@ -94,7 +102,6 @@ class DatabaseConfig:
                 logger.debug(f"SQL: {statement}")
         
         return engine
-
 
 class DatabaseManager:
     """Database manager for operations like init, migrate, backup, etc."""

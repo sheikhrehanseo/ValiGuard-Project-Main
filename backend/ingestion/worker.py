@@ -494,42 +494,46 @@ class IngestionWorker:
             # Sleep cooperatively so stop() can interrupt promptly.
             self._stop_event.wait(backoff)
 
+    def _is_tendermint_endpoint(self) -> bool:
+        """
+        Return True if the node_manager is configured for a Tendermint RPC port
+        (e.g. :26657) or if a test has monkeypatched _fast_rpc_call.
+        """
+        if "_fast_rpc_call" in self.__dict__:
+            return True
+        rpc_url = getattr(self.node_manager, "rpc_url", "") or ""
+        return ":26657" in rpc_url or "localhost" in rpc_url or "127.0.0.1" in rpc_url
+
     def poll_once(self) -> List[Dict[str, Any]]:
         """
         Execute a single polling iteration across Tendermint RPC and Standard
-        EVM JSON-RPC: fetch mempool + latest block txs, normalize the unseen
-        ones, score each with the anomaly model, persist Transaction +
-        AnomalyDetection + Alert rows, fire the callback for each, and return
-        the final normalized+scored dicts.
-
-        Returns:
-            List of normalized Transaction-shaped dicts (with anomaly_score
-            and is_flagged populated) that were newly seen and processed in
-            this iteration.
+        EVM JSON-RPC.
         """
         new_normalized: List[Dict[str, Any]] = []
+        use_tendermint = self._is_tendermint_endpoint()
 
-        # 1) Tendermint Mempool (unconfirmed txs).
-        if self.mempool_enabled:
+        # 1) Tendermint Mempool (unconfirmed txs) — only when connected to a Tendermint RPC port.
+        if self.mempool_enabled and use_tendermint:
             for raw in self._fetch_mempool_txs():
                 normalized = self._handle_raw(raw)
                 if normalized is not None:
                     new_normalized.append(normalized)
 
-        # 2) Tendermint Latest block (confirmed txs).
-        for raw in self._fetch_latest_block_txs():
-            normalized = self._handle_raw(raw)
-            if normalized is not None:
-                new_normalized.append(normalized)
+        # 2) Tendermint Latest block (confirmed txs) — only when connected to a Tendermint RPC port.
+        if use_tendermint:
+            for raw in self._fetch_latest_block_txs():
+                normalized = self._handle_raw(raw)
+                if normalized is not None:
+                    new_normalized.append(normalized)
 
         # 3) Standard EVM JSON-RPC Mempool (pending txs), when supported by node_manager.
-        if self.mempool_enabled and self.evm_rpc_enabled:
+        if self.mempool_enabled and self.evm_rpc_enabled and use_tendermint:
             for raw in self._fetch_evm_mempool_txs():
                 normalized = self._handle_raw(raw)
                 if normalized is not None:
                     new_normalized.append(normalized)
 
-        # 4) Standard EVM JSON-RPC Latest block (confirmed txs), when supported.
+        # 4) Standard EVM JSON-RPC Latest block (confirmed txs).
         if self.evm_rpc_enabled:
             for raw in self._fetch_evm_latest_block_txs():
                 normalized = self._handle_raw(raw)

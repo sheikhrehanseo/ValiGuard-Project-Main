@@ -34,7 +34,7 @@ export default function WalletConnect({ onConnect }) {
         if (typeof window !== 'undefined' && window.ethereum) {
             window.ethereum.request({ method: 'eth_accounts' })
                 .then(handleAccountsChanged)
-                .catch(console.error);
+                .catch((err) => console.warn("Wallet auto-check skipped:", err));
 
             window.ethereum.on('accountsChanged', handleAccountsChanged);
         }
@@ -57,7 +57,7 @@ export default function WalletConnect({ onConnect }) {
             setAuthError(null);
             return true;
         } catch (err) {
-            console.error('Backend sign-in failed:', err);
+            console.warn('Backend sign-in failed:', err);
             setAuthError(err.message || 'Authentication failed');
             return false;
         } finally {
@@ -116,15 +116,32 @@ export default function WalletConnect({ onConnect }) {
     };
 
     const fetchBalance = async (address) => {
-        try {
-            if (window.ethereum) {
+        // 1. Try MetaMask BrowserProvider first
+        if (typeof window !== 'undefined' && window.ethereum) {
+            try {
                 const provider = new ethers.BrowserProvider(window.ethereum);
                 const bal = await provider.getBalance(address);
                 setBalance(ethers.formatEther(bal));
+                return;
+            } catch (err) {
+                // MetaMask RPC rate-limited (-32002) or unreachable; fall back to backend RPC
+                console.warn("MetaMask getBalance fallback to backend RPC:", err?.message || err);
             }
-        } catch (err) {
-            console.error("Failed to fetch balance:", err);
         }
+
+        // 2. Fallback to backend /api/v1/qie/account/<address>
+        try {
+            const res = await fetch(`${API_BASE}/api/v1/qie/account/${address}`);
+            if (res.ok) {
+                const body = await res.json();
+                const rawBal = body?.data?.balance || "0";
+                setBalance(ethers.formatEther(rawBal));
+                return;
+            }
+        } catch (fallbackErr) {
+            // Ignore and default to 0.0000
+        }
+        setBalance("0.0000");
     };
 
     const connectWallet = async () => {

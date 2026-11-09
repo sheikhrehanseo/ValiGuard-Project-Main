@@ -94,7 +94,8 @@ def _emit_transaction_events(tx: Dict[str, Any]) -> None:
 
 # Configuration
 API_KEY = os.getenv("VALIGUARD_API_KEY", "dev-key-change-in-production")
-RATE_LIMIT = 100  # requests per minute
+# RATE_LIMIT = 100  # requests per minute
+RATE_LIMIT = int(os.getenv("VALIGUARD_RATE_LIMIT", "1000"))  # requests per minute
 DB_PATH = os.getenv("DB_PATH", "./data/valiguard.db")
 ALERT_EMAIL = os.getenv("ALERT_EMAIL", "admin@valiguard.ai")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
@@ -1161,49 +1162,45 @@ def _probe_node_telemetry() -> Dict[str, Any]:
         "chain_id": qie_manager.chain_id,
         "rpc_url": qie_manager.rpc_url,
     }
-    try:
-        try:
-            response = requests.post(
-                qie_manager.rpc_url,
-                json={"jsonrpc": "2.0", "id": 1, "method": "status", "params": {}},
-                timeout=3,
-            )
-        except requests.exceptions.SSLError:
-            response = requests.post(
-                qie_manager.rpc_url,
-                json={"jsonrpc": "2.0", "id": 1, "method": "status", "params": {}},
-                timeout=3,
-                verify=False,
-            )
-        response.raise_for_status()
-        payload = response.json() or {}
-        result = payload.get("result", {}) or {}
-        sync_info = result.get("sync_info", {}) or {}
-        if sync_info:
-            return {
-                **base,
-                "available": True,
-                "online": True,
-                "synced": not bool(sync_info.get("catching_up", True)),
-                "block_height": int(sync_info.get("latest_block_height", 0) or 0),
-                "moniker": (result.get("node_info", {}) or {}).get("moniker", ""),
-            }
 
-        # Fallback for Public EVM JSON-RPC endpoints (e.g. https://rpc1testnet.qie.digital)
-        evm_url = getattr(qie_manager, "evm_rpc_url", None) or qie_manager.rpc_url
+    def _post_rpc(url: str, payload: Dict[str, Any]):
         try:
-            evm_response = requests.post(
-                evm_url,
-                json={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []},
-                timeout=3,
-            )
+            return requests.post(url, json=payload, timeout=3)
         except requests.exceptions.SSLError:
-            evm_response = requests.post(
-                evm_url,
-                json={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []},
-                timeout=3,
-                verify=False,
+            return requests.post(url, json=payload, timeout=3, verify=False)
+
+    try:
+        # 1. Try Tendermint /status first
+        try:
+            response = _post_rpc(
+                qie_manager.rpc_url,
+                {"jsonrpc": "2.0", "id": 1, "method": "status", "params": {}},
             )
+            response.raise_for_status()
+            payload = response.json() or {}
+            result = payload.get("result", {}) or {}
+            sync_info = result.get("sync_info", {}) or {}
+            if sync_info:
+                return {
+                    **base,
+                    "available": True,
+                    "online": True,
+                    "synced": not bool(sync_info.get("catching_up", True)),
+                    "block_height": int(sync_info.get("latest_block_height", 0) or 0),
+                    "moniker": (result.get("node_info", {}) or {}).get("moniker", ""),
+                }
+        except requests.Timeout:
+            # Fail fast on timeout (required by test_stage25_node_status.py)
+            return base
+        except Exception as td_exc:
+            logger.debug(f"Tendermint status probe fell back to EVM: {td_exc}")
+
+        # 2. Fallback for Public EVM JSON-RPC endpoints (e.g. https://rpc1testnet.qie.digital)
+        evm_url = getattr(qie_manager, "evm_rpc_url", None) or qie_manager.rpc_url
+        evm_response = _post_rpc(
+            evm_url,
+            {"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []},
+        )
         evm_response.raise_for_status()
         hex_height = (evm_response.json() or {}).get("result")
         if isinstance(hex_height, str) and hex_height.startswith(("0x", "0X")):

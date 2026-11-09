@@ -20,10 +20,14 @@ import signal
 from typing import Dict, Optional, Any, List
 from pathlib import Path
 import requests
+import urllib3
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from dotenv import load_dotenv
+
+# Suppress InsecureRequestWarning when falling back on self-signed/incomplete RPC SSL chains
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Load environment variables
 load_dotenv()
@@ -68,6 +72,7 @@ class QIENodeManager:
         
         self.node_process: Optional[subprocess.Popen] = None
         self.is_running = False
+        self._validator_set_cache: Dict[str, Any] = {"result": None, "fetched_at": 0.0}
         
         # Setup resilient HTTP session with retries
         self.session = self._create_session()
@@ -78,13 +83,14 @@ class QIENodeManager:
         )
     
     def _create_session(self) -> requests.Session:
-        """Create a requests session with retry logic."""
+        """Create a requests session with retry logic and SSL tolerance for public RPCs."""
         session = requests.Session()
+        session.verify = False
         retry_strategy = Retry(
-            total=3,
+            total=2,
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["GET", "POST"],
-            backoff_factor=1
+            backoff_factor=0.5
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
         session.mount("http://", adapter)
@@ -94,14 +100,6 @@ class QIENodeManager:
     def _rpc_call(self, method: str, params: Optional[Dict] = None, timeout: int = 10) -> Dict[str, Any]:
         """
         Make a JSON-RPC call to the Tendermint RPC endpoint.
-        
-        Args:
-            method: RPC method name (e.g., 'status', 'block', 'unconfirmed_txs')
-            params: Optional parameters dict
-            timeout: Request timeout in seconds
-            
-        Returns:
-            Response data or empty dict on error
         """
         try:
             payload = {
@@ -121,14 +119,13 @@ class QIENodeManager:
                 
                 data = response.json()
                 if "error" in data and data["error"]:
-                    logger.error(f"RPC error for {method}: {data['error']}")
+                    logger.debug(f"RPC error for {method}: {data['error']}")
                     return {}
 
                 return data.get("result", {})
                 
             except Exception as inner_e:
-                # Suppress all connection errors for demo stability
-                logger.warning(f"RPC Connection failed for {method} (running in offline mode): {inner_e}")
+                logger.debug(f"RPC Connection failed for {method} (running in offline mode): {inner_e}")
                 return {}
 
         except Exception as e:
@@ -153,15 +150,6 @@ class QIENodeManager:
     ) -> Any:
         """
         Make a standard Ethereum JSON-RPC 2.0 call to the QIE EVM RPC endpoint.
-        
-        Args:
-            method: EVM JSON-RPC method (e.g., 'eth_blockNumber', 'eth_getBlockByNumber')
-            params: Positional parameters list per Ethereum JSON-RPC spec
-            timeout: Request timeout in seconds
-            use_session: Use retrying session if True, else fast one-shot requests.post
-            
-        Returns:
-            The 'result' field from the JSON-RPC response, or None on error/unreachable.
         """
         payload = {
             "jsonrpc": "2.0",
@@ -171,11 +159,19 @@ class QIENodeManager:
         }
         http_client = self.session if use_session else requests
         try:
-            response = http_client.post(
-                self.evm_rpc_url,
-                json=payload,
-                timeout=timeout,
-            )
+            try:
+                response = http_client.post(
+                    self.evm_rpc_url,
+                    json=payload,
+                    timeout=timeout,
+                )
+            except requests.exceptions.SSLError:
+                response = http_client.post(
+                    self.evm_rpc_url,
+                    json=payload,
+                    timeout=timeout,
+                    verify=False,
+                )
             response.raise_for_status()
             data = response.json()
             if isinstance(data, dict):
@@ -214,10 +210,6 @@ class QIENodeManager:
     ) -> Dict[str, Any]:
         """
         Get the latest block and its transactions via standard EVM eth_getBlockByNumber.
-        
-        Args:
-            full_transactions: If True, returns full transaction objects instead of hashes.
-            timeout: Request timeout in seconds.
         """
         block = self.evm_rpc_call(
             "eth_getBlockByNumber", ["latest", full_transactions], timeout=timeout
@@ -259,9 +251,6 @@ class QIENodeManager:
     def get_evm_pending_transactions(self, timeout: int = 3) -> List[Dict[str, Any]]:
         """
         Fetch pending mempool transactions via standard EVM JSON-RPC.
-        
-        Tries eth_getBlockByNumber('pending', True) first, and falls back to
-        txpool_content if the node exposes the Geth/Ethermint txpool namespace.
         """
         pending_block = self.evm_rpc_call(
             "eth_getBlockByNumber", ["pending", True], timeout=timeout
@@ -334,12 +323,7 @@ class QIENodeManager:
         }
     
     def start_qie_node(self) -> Dict[str, Any]:
-        """
-        Start a local QIE node with configured settings.
-        
-        Returns:
-            Status dict with keys: success (bool), message (str), pid (int or None)
-        """
+        """Start a local QIE node with configured settings."""
         if self.is_running:
             logger.warning("Node is already running")
             return {
@@ -350,12 +334,9 @@ class QIENodeManager:
         
         try:
             logger.info(f"Starting QIE node (moniker: {self.moniker}, home: {self.qie_home})")
-            
-            # Ensure qie_home exists
             qie_path = Path(self.qie_home)
             qie_path.mkdir(parents=True, exist_ok=True)
             
-            # Start the node
             self.node_process = subprocess.Popen(
                 [self.qied_binary, "start", "--home", self.qie_home],
                 stdout=subprocess.PIPE,
@@ -365,8 +346,6 @@ class QIENodeManager:
             
             self.is_running = True
             logger.info(f"Node started with PID {self.node_process.pid}")
-            
-            # Give node a moment to initialize
             time.sleep(2)
             
             return {
@@ -391,15 +370,7 @@ class QIENodeManager:
             }
     
     def stop_qie_node(self, timeout: int = 10) -> Dict[str, Any]:
-        """
-        Gracefully stop the running QIE node.
-        
-        Args:
-            timeout: Grace period before forcing termination (seconds)
-            
-        Returns:
-            Status dict with keys: success (bool), message (str)
-        """
+        """Gracefully stop the running QIE node."""
         if not self.is_running or self.node_process is None:
             logger.warning("No running node to stop")
             return {
@@ -409,8 +380,6 @@ class QIENodeManager:
         
         try:
             logger.info("Stopping QIE node gracefully")
-            
-            # Send SIGTERM for graceful shutdown
             self.node_process.send_signal(signal.SIGTERM)
             
             try:
@@ -435,21 +404,20 @@ class QIENodeManager:
             }
     
     def check_node_health(self) -> Dict[str, Any]:
-        """
-        Check the health of the QIE node by querying status.
-        
-        Returns:
-            Health status dict with keys:
-                - healthy (bool): True if node is responding and synced
-                - message (str): Status message
-                - height (int): Current block height
-                - sync_info (dict): Synchronization info
-                - validator_info (dict): Validator info
-        """
+        """Check the health of the QIE node by querying status."""
         try:
             status = self._rpc_call("status")
             
             if not status:
+                evm_height = self.get_evm_block_number(timeout=3)
+                if evm_height is not None and evm_height > 0:
+                    return {
+                        "healthy": True,
+                        "message": "Node is healthy (via EVM RPC)",
+                        "height": evm_height,
+                        "sync_info": {"latest_block_height": str(evm_height), "catching_up": False},
+                        "validator_info": {}
+                    }
                 return {
                     "healthy": False,
                     "message": "Node is not responding to RPC calls",
@@ -490,12 +458,7 @@ class QIENodeManager:
             }
     
     def get_node_status(self) -> Dict[str, Any]:
-        """
-        Get detailed node status from the RPC endpoint.
-        
-        Returns:
-            Status dict containing node info, sync status, and validator info
-        """
+        """Get detailed node status from the RPC endpoint."""
         try:
             status = self._rpc_call("status")
             
@@ -520,17 +483,8 @@ class QIENodeManager:
             }
     
     def get_validator_info(self, validator_address: str) -> Dict[str, Any]:
-        """
-        Get information about a specific validator.
-        
-        Args:
-            validator_address: Validator address
-            
-        Returns:
-            Validator info dict
-        """
+        """Get information about a specific validator."""
         try:
-            # Query validator info from staking module
             query_result = self._rpc_call(
                 "abci_query",
                 {
@@ -563,18 +517,42 @@ class QIENodeManager:
     def get_validator_set(
         self, per_page: int = 100, max_pages: int = 100
     ) -> Dict[str, Any]:
-        """Get the validator set from Tendermint's paginated GET endpoint."""
+        """Get the validator set from Tendermint's paginated GET endpoint (cached for 30s)."""
+        if ":26657" not in self.rpc_url and "qie.test" not in self.rpc_url:
+            return {
+                "success": False,
+                "validators": [],
+                "block_height": 0,
+                "total": 0,
+                "message": "Tendermint /validators endpoint not exposed on public EVM gateway",
+            }
+        now = time.time()
+        if (
+            per_page == 100
+            and self._validator_set_cache["result"] is not None
+            and now - self._validator_set_cache["fetched_at"] < 30.0
+        ):
+            return self._validator_set_cache["result"]
+
         validators: List[Dict[str, Any]] = []
         block_height = 0
         base_url = self.rpc_url.rstrip("/")
 
         try:
             for page in range(1, max_pages + 1):
-                response = requests.get(
-                    f"{base_url}/validators",
-                    params={"page": page, "per_page": per_page},
-                    timeout=3,
-                )
+                try:
+                    response = requests.get(
+                        f"{base_url}/validators",
+                        params={"page": page, "per_page": per_page},
+                        timeout=3,
+                    )
+                except requests.exceptions.SSLError:
+                    response = requests.get(
+                        f"{base_url}/validators",
+                        params={"page": page, "per_page": per_page},
+                        timeout=3,
+                        verify=False,
+                    )
                 response.raise_for_status()
                 payload = response.json()
                 result = payload.get("result", payload) or {}
@@ -592,40 +570,37 @@ class QIENodeManager:
                 ):
                     break
 
-            return {
+            res = {
                 "success": True,
                 "validators": validators,
                 "block_height": block_height,
                 "total": len(validators),
                 "message": "Validator set retrieved successfully",
             }
+            if per_page == 100:
+                self._validator_set_cache = {"result": res, "fetched_at": now}
+            return res
         except Exception as e:
-            logger.warning(f"Unable to retrieve validator set: {e}")
-            return {
+            logger.debug(f"Unable to retrieve validator set: {e}")
+            res = {
                 "success": False,
                 "validators": [],
                 "block_height": block_height,
                 "total": 0,
                 "message": f"Validator set unavailable: {e}",
             }
+            if per_page == 100:
+                self._validator_set_cache = {"result": res, "fetched_at": now}
+            return res
     
     def query_balance(self, address: str) -> Dict[str, Any]:
-        """
-        Query account balance from the blockchain (supports both Cosmos qie1... and EVM 0x... addresses).
-        
-        Args:
-            address: Account address
-            
-        Returns:
-            Balance info dict with keys: success (bool), balance (str), denom (str), message (str)
-        """
+        """Query account balance from the blockchain (supports Cosmos qie1... and EVM 0x... addresses)."""
         try:
             if isinstance(address, str) and address.startswith(("0x", "0X")):
                 evm_res = self.query_evm_balance(address)
                 if evm_res.get("success"):
                     return evm_res
 
-            # Query account balance via Tendermint ABCI
             query_result = self._rpc_call(
                 "abci_query",
                 {
@@ -643,7 +618,6 @@ class QIENodeManager:
                     "message": "Address not found or no balance"
                 }
             
-            # Parse balance from response (structure may vary by chain)
             response_data = query_result.get("response", {})
             value = response_data.get("value", "")
             
@@ -665,32 +639,18 @@ class QIENodeManager:
             }
     
     def broadcast_transaction(self, tx_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Broadcast a signed transaction to the QIE network (Tendermint RPC or EVM raw hex).
-        
-        Args:
-            tx_dict: Transaction dictionary (must be signed and encoded) or raw hex string
-            
-        Returns:
-            Broadcast result dict with keys:
-                - success (bool): Transaction accepted
-                - hash (str): Transaction hash
-                - code (int): Transaction result code
-                - message (str): Status message
-        """
+        """Broadcast a signed transaction to the QIE network (Tendermint RPC or EVM raw hex)."""
         try:
             if isinstance(tx_dict, str) and tx_dict.startswith(("0x", "0X")):
                 return self.broadcast_evm_transaction(tx_dict)
             if isinstance(tx_dict, dict) and isinstance(tx_dict.get("raw_tx"), str) and tx_dict["raw_tx"].startswith(("0x", "0X")):
                 return self.broadcast_evm_transaction(tx_dict["raw_tx"])
 
-            # Serialize transaction to JSON string
             if isinstance(tx_dict, dict):
                 tx_string = json.dumps(tx_dict)
             else:
                 tx_string = str(tx_dict)
             
-            # Broadcast via RPC
             broadcast_result = self._rpc_call(
                 "broadcast_tx_sync",
                 {"tx": tx_string}
@@ -728,12 +688,7 @@ class QIENodeManager:
             }
     
     def get_latest_block(self) -> Dict[str, Any]:
-        """
-        Get the latest block information.
-        
-        Returns:
-            Block info dict
-        """
+        """Get the latest block information."""
         try:
             block = self._rpc_call("block", {})
             
@@ -766,16 +721,7 @@ class QIENodeManager:
             }
     
     def wait_for_sync(self, max_attempts: int = 60, interval: int = 5) -> Dict[str, Any]:
-        """
-        Wait for the node to sync with the network.
-        
-        Args:
-            max_attempts: Maximum number of checks
-            interval: Seconds between checks
-            
-        Returns:
-            Sync result dict
-        """
+        """Wait for the node to sync with the network."""
         logger.info(f"Waiting for node to sync (max {max_attempts} attempts, {interval}s interval)")
         
         for attempt in range(max_attempts):
@@ -801,24 +747,3 @@ class QIENodeManager:
             "attempts": max_attempts,
             "height": health["height"]
         }
-
-
-# Example usage and testing
-if __name__ == "__main__":
-    # Initialize manager
-    manager = QIENodeManager()
-    
-    # Check node health
-    print("Checking node health...")
-    health = manager.check_node_health()
-    print(f"Health: {json.dumps(health, indent=2)}")
-    
-    # Get node status
-    print("\nGetting node status...")
-    status = manager.get_node_status()
-    print(f"Status: {json.dumps(status, indent=2)}")
-    
-    # Get latest block
-    print("\nGetting latest block...")
-    block = manager.get_latest_block()
-    print(f"Block: {json.dumps(block, indent=2)}")
