@@ -1,4 +1,4 @@
-web3==6.11.3
+web3==6.15.0
 python-dotenv==1.0.0
 pandas==2.2.3
 numpy==1.26.4
@@ -15,7 +15,7 @@ alembic==1.13.1
 psycopg==3.1.17
 psutil==5.9.8
 pyjwt==2.15.0
-eth-account==0.14.0
+# eth-account==0.14.0
 flask-socketio==5.6.1
 flask-limiter==4.1.1
 simple-websocket==1.1.0

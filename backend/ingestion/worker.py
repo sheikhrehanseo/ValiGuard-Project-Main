@@ -18,24 +18,26 @@ from qie_node_manager import QIENodeManager
 # Phase 2 ML scoring.
 from ml.anomaly_model import AnomalyModel, get_model as get_anomaly_model
 
-# Canonical 4-tier severity scale (single source of truth — shared with app.py
-# and ml/anomaly_model.py; do not re-implement thresholds here).
+# Canonical 4-tier severity scale
 from core.severity import (
     is_alerting_severity,
     severity_from_score as _canonical_severity_from_score,
 )
 from core.scoring import score_and_persist_transaction
 
-# Phase 1 DB layer — reuse the same DatabaseManager / session pattern as app.py.
+# Phase 1 DB layer
 from database.db import DatabaseManager, DatabaseConfig
-from database.models import SeverityLevel, Transaction, TransactionStatus
+from database.models import (
+    Bridge,
+    BridgeStatus,
+    SeverityLevel,
+    Transaction,
+    TransactionStatus,
+    Validator,
+)
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Severity helpers (canonical scale lives in backend/core/severity.py)
-# ---------------------------------------------------------------------------
 
 def _severity_from_score(score_0_100: float) -> str:
     """Map a 0-100 anomaly score to a canonical severity tier string."""
@@ -52,10 +54,6 @@ def _severity_enum(severity_str: str) -> SeverityLevel:
     }
     return mapping.get(severity_str, SeverityLevel.LOW)
 
-
-# ---------------------------------------------------------------------------
-# Normalization & Decoding
-# ---------------------------------------------------------------------------
 
 def _coerce_float(value: Any, default: Optional[float] = None) -> Optional[float]:
     """
@@ -87,7 +85,6 @@ def _coerce_float(value: Any, default: Optional[float] = None) -> Optional[float
         if s.startswith(("0x", "0X")):
             try:
                 raw_int = int(s, 16)
-                # Standard EVM value is in wei / aqie (10^18 per QIE)
                 if raw_int >= 10**12:
                     return round(float(raw_int) / 1e18, 6)
                 return float(raw_int)
@@ -129,9 +126,9 @@ def _iso_to_datetime(value: Optional[str]) -> Optional[datetime]:
         except (ValueError, OSError):
             return None
     try:
-        # Tendermint timestamps look like "2026-07-19T12:34:56.123456789Z"
-        # Truncate nanoseconds to microseconds for fromisoformat compatibility.
         ts = str(value).rstrip("Z")
+        if "+" in ts:
+            ts = ts.split("+", 1)[0]
         if "." in ts:
             head, frac = ts.split(".", 1)
             ts = f"{head}.{frac[:6]}"
@@ -162,12 +159,7 @@ def deterministic_raw_hash(entry: Any) -> str:
 def _try_decode_raw_entry(raw_entry: Any) -> Optional[Dict[str, Any]]:
     """
     Attempt to decode a raw Tendermint / Cosmos / EVM transaction entry into
-    structured fields (tx_hash, sender, receiver, value, source_chain,
-    destination_chain).
-
-    Returns a dict of decoded fields if the payload contains structured
-    transaction metadata, or None if the entry is an opaque binary payload
-    (preserving the raw-entry NULL contract for undecodable blobs).
+    structured fields.
     """
     payload: Optional[Dict[str, Any]] = None
     if isinstance(raw_entry, dict):
@@ -186,7 +178,6 @@ def _try_decode_raw_entry(raw_entry: Any) -> Optional[Dict[str, Any]]:
     if not payload:
         return None
 
-    # 1) Cosmos SDK StdTx / TxBody envelope (e.g., cosmos-sdk/StdTx, MsgSend, MsgTransfer)
     tx_val = payload.get("value") if isinstance(payload.get("value"), dict) else None
     body_val = payload.get("body") if isinstance(payload.get("body"), dict) else None
     msgs = []
@@ -244,7 +235,6 @@ def _try_decode_raw_entry(raw_entry: Any) -> Optional[Dict[str, Any]]:
                 "destination_chain": destination_chain,
             }
 
-    # 2) Direct EVM or Bridge JSON transaction object
     sender = payload.get("sender") or payload.get("from") or payload.get("from_address")
     receiver = payload.get("receiver") or payload.get("to") or payload.get("to_address")
     raw_val = payload.get("value") if not isinstance(payload.get("value"), dict) else None
@@ -288,20 +278,7 @@ def normalize_transaction(
 ) -> Dict[str, Any]:
     """
     Normalize a raw QIE Tendermint or EVM RPC transaction payload into the
-    Transaction schema shape (matching backend/database/models.py Transaction.to_dict()).
-
-    If `_raw_entry` contains a decodable JSON / Cosmos StdTx / EVM payload,
-    its sender, receiver, value, source_chain, and destination_chain fields
-    are extracted. If `_raw_entry` is an opaque binary blob with no decodable
-    structure, it is persisted honestly with sender=None, receiver=None,
-    value=None, source_chain=None, destination_chain=None, and bridge_id=None.
-
-    Args:
-        raw_tx: Raw transaction dict from QIENodeManager (mempool or block).
-        bridge_id: Bridge FK to assign (resolved upstream by the persistence
-            layer; None is acceptable for normalization-only).
-    Returns:
-        Dict matching Transaction.to_dict() field names.
+    Transaction schema shape.
     """
     tx = raw_tx if isinstance(raw_tx, dict) else {}
     raw_entry = tx.get("_raw_entry")
@@ -336,13 +313,23 @@ def normalize_transaction(
             or tx.get("destinationChain")
             or tx.get("dest_chain")
         )
-        # Standard EVM RPC transaction objects have 'from'/'to' without explicit chain names
         if (sender or receiver) and source_chain is None and ("blockNumber" in tx or "chainId" in tx or "gasPrice" in tx):
-            source_chain = "QIE"
+            input_hex = str(tx.get("input") or "0x")
+            if input_hex and input_hex != "0x" and len(input_hex) >= 10:
+                source_chain = f"QIE Contract ({input_hex[:10]})"
+            else:
+                source_chain = "QIE Native Settlement"
         if (sender or receiver) and destination_chain is None and ("blockNumber" in tx or "chainId" in tx or "gasPrice" in tx):
             destination_chain = "QIE"
 
-    # Timestamp: block header time for confirmed txs, else "now".
+        # If EVM transaction has 0 native value (e.g. contract call), estimate metric from gas * gasPrice
+        if value == 0.0 and ("gasPrice" in tx or "gas" in tx):
+            gp = _coerce_float(tx.get("gasPrice"), default=0.0) or 0.0
+            gas = _coerce_float(tx.get("gas"), default=21000.0) or 21000.0
+            if gp > 0:
+                fee_qie = gp * gas if gp < 1.0 else (gp * gas) / 1e18
+                value = round(max(fee_qie * 1000.0, 0.0001), 6)
+
     raw_ts = (
         tx.get("timestamp")
         or tx.get("time")
@@ -350,7 +337,6 @@ def normalize_transaction(
     )
     timestamp = _iso_to_datetime(raw_ts) or datetime.utcnow()
 
-    # Status: confirmed if it came from a block, pending if from mempool.
     if tx.get("_source") == "block" or tx.get("height") is not None or tx.get("blockNumber") is not None:
         status = "confirmed"
     elif tx.get("_source") == "mempool":
@@ -359,7 +345,6 @@ def normalize_transaction(
         status = tx.get("status") or "pending"
 
     return {
-        # id intentionally omitted — assigned by the DB on insert.
         "tx_hash": tx_hash,
         "bridge_id": bridge_id,
         "source_chain": source_chain,
@@ -367,29 +352,23 @@ def normalize_transaction(
         "value": value,
         "sender": sender,
         "receiver": receiver,
+        "bridge_address": tx.get("bridge_address"),
+        "bridge_chain_name": tx.get("bridge_chain_name") or source_chain,
         "timestamp": timestamp,
         "status": status,
-        "anomaly_score": None,  # populated by the ML scoring pipeline
-        "is_flagged": False,     # set by the scoring/alerting layer
+        "anomaly_score": None,
+        "is_flagged": False,
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
     }
 
 
-# ---------------------------------------------------------------------------
-# Worker
-# ---------------------------------------------------------------------------
-
 class IngestionWorker:
     """
-    Polls QIE mempool/blocks via QIENodeManager (Tendermint RPC & Standard EVM
-    JSON-RPC), normalizes each newly-seen transaction, scores it with the
-    Isolation Forest anomaly model, and persists Transaction + AnomalyDetection
-    + Alert rows to the database.
-
-    Designed for standalone testing: pass mocked QIENodeManager /
-    DatabaseManager / AnomalyModel and inspect `worker.poll_once()` results,
-    or run the loop with `run()` / `start()`.
+    Polls QIE mempool/blocks via QIENodeManager (Tendermint RPC, Standard EVM
+    JSON-RPC, and QIE Mainnet Explorer API v2), normalizes each newly-seen
+    transaction, scores it with the Isolation Forest anomaly model, and
+    persists Transaction + AnomalyDetection + Alert rows to the database.
     """
 
     def __init__(
@@ -402,32 +381,13 @@ class IngestionWorker:
         bridge_id: Optional[int] = None,
         on_new_transaction: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
-        """
-        Args:
-            node_manager: QIENodeManager instance to reuse. If None, a default
-                one is constructed (reads QIE_RPC_URL / QIE_EVM_RPC_URL from env).
-            db_manager: DatabaseManager instance to reuse (same pattern as
-                app.py). If None, a default one is constructed via
-                DatabaseConfig() and init_db() is called.
-            anomaly_model: AnomalyModel instance for scoring. If None, the
-                singleton from ml.anomaly_model.get_model() is used.
-            poll_interval: Seconds between successful poll iterations.
-            max_backoff: Cap for exponential backoff when RPC calls fail.
-            bridge_id: Optional known bridge FK for explicitly identified data.
-            on_new_transaction: Optional callback invoked once per newly
-                normalized+scored+persisted transaction with the final dict
-                (including anomaly_score / is_flagged / alert_id).
-        """
         self.node_manager = node_manager or QIENodeManager()
 
-        # DB layer — reuse the same DatabaseManager / get_session() pattern
-        # as app.py. Do NOT reinvent session/commit/rollback logic here.
         if db_manager is None:
             db_manager = DatabaseManager(DatabaseConfig())
             db_manager.init_db()
         self.db_manager = db_manager
 
-        # ML scoring — Phase 2 singleton by default.
         self.anomaly_model = anomaly_model or get_anomaly_model()
 
         self.poll_interval = poll_interval
@@ -441,16 +401,13 @@ class IngestionWorker:
         self.bridge_id = bridge_id
         self.on_new_transaction = on_new_transaction
 
-        # In-memory de-duplication of tx_hash across iterations. The DB unique
-        # constraint is the final guard (IntegrityError → skip+log); this set
-        # just avoids re-normalizing/scoring/persisting the same tx every loop.
         self._seen_hashes: set[str] = set()
+        self._last_evm_block_height: Optional[int] = None
+        self._last_explorer_sync: float = 0.0
+        self._last_validator_sync: float = 0.0
 
-        # Loop control.
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
-
-    # -- public API --------------------------------------------------------
 
     def start(self, daemon: bool = True) -> None:
         """Start the polling loop in a background thread."""
@@ -473,67 +430,78 @@ class IngestionWorker:
         logger.info("Ingestion worker stopped")
 
     def run(self) -> None:
-        """
-        Continuous polling loop. Runs until `stop()` is called.
-
-        On RPC failure it backs off exponentially (capped at `max_backoff`)
-        and retries — it never raises out of this method.
-        """
+        """Continuous polling loop. Runs until `stop()` is called."""
         backoff = self.poll_interval
         while not self._stop_event.is_set():
             try:
                 new_txs = self.poll_once()
                 if new_txs:
                     logger.info("Ingested %d new transaction(s)", len(new_txs))
-                # Success: reset backoff to the base poll interval.
                 backoff = self.poll_interval
             except Exception as exc:  # noqa: BLE001 — loop must not die
                 logger.error("Ingestion poll failed: %s — backing off %.1fs", exc, backoff)
                 backoff = min(backoff * 2.0, self.max_backoff)
 
-            # Sleep cooperatively so stop() can interrupt promptly.
             self._stop_event.wait(backoff)
 
     def _is_tendermint_endpoint(self) -> bool:
-        """
-        Return True if the node_manager is configured for a Tendermint RPC port
-        (e.g. :26657) or if a test has monkeypatched _fast_rpc_call.
-        """
+        """Return True if the node_manager is configured for a Tendermint RPC port."""
         if "_fast_rpc_call" in self.__dict__:
             return True
         rpc_url = getattr(self.node_manager, "rpc_url", "") or ""
         return ":26657" in rpc_url or "localhost" in rpc_url or "127.0.0.1" in rpc_url
 
+    def _is_public_qie_gateway(self) -> bool:
+        """Return True when connected to a public QIE gateway (*.qie.digital)."""
+        if hasattr(self.node_manager, "is_public_qie_gateway"):
+            return bool(self.node_manager.is_public_qie_gateway())
+        return False
+
     def poll_once(self) -> List[Dict[str, Any]]:
         """
-        Execute a single polling iteration across Tendermint RPC and Standard
-        EVM JSON-RPC.
+        Execute a single polling iteration across Tendermint RPC, Standard
+        EVM JSON-RPC, and QIE Mainnet Explorer REST API v2.
         """
         new_normalized: List[Dict[str, Any]] = []
         use_tendermint = self._is_tendermint_endpoint()
+        use_public_qie = self._is_public_qie_gateway()
 
-        # 1) Tendermint Mempool (unconfirmed txs) — only when connected to a Tendermint RPC port.
+        # When connected to live QIE gateway, sync real network validators & recent explorer txs
+        now = time.time()
+        if use_public_qie:
+            if now - self._last_validator_sync >= 30.0:
+                self._sync_live_qie_validators()
+                self._last_validator_sync = now
+
+            if now - self._last_explorer_sync >= 12.0:
+                for raw in self._fetch_explorer_recent_txs():
+                    normalized = self._handle_raw(raw)
+                    if normalized is not None:
+                        new_normalized.append(normalized)
+                self._last_explorer_sync = now
+
+        # 1) Tendermint Mempool (unconfirmed txs).
         if self.mempool_enabled and use_tendermint:
             for raw in self._fetch_mempool_txs():
                 normalized = self._handle_raw(raw)
                 if normalized is not None:
                     new_normalized.append(normalized)
 
-        # 2) Tendermint Latest block (confirmed txs) — only when connected to a Tendermint RPC port.
+        # 2) Tendermint Latest block (confirmed txs).
         if use_tendermint:
             for raw in self._fetch_latest_block_txs():
                 normalized = self._handle_raw(raw)
                 if normalized is not None:
                     new_normalized.append(normalized)
 
-        # 3) Standard EVM JSON-RPC Mempool (pending txs), when supported by node_manager.
+        # 3) Standard EVM JSON-RPC Mempool (pending txs).
         if self.mempool_enabled and self.evm_rpc_enabled and use_tendermint:
             for raw in self._fetch_evm_mempool_txs():
                 normalized = self._handle_raw(raw)
                 if normalized is not None:
                     new_normalized.append(normalized)
 
-        # 4) Standard EVM JSON-RPC Latest block (confirmed txs).
+        # 4) Standard EVM JSON-RPC Latest blocks (confirmed txs).
         if self.evm_rpc_enabled:
             for raw in self._fetch_evm_latest_block_txs():
                 normalized = self._handle_raw(raw)
@@ -542,22 +510,59 @@ class IngestionWorker:
 
         return new_normalized
 
+    def _sync_live_qie_validators(self) -> None:
+        """Upsert real QIE Mainnet validators (online & offline) into the database."""
+        if not hasattr(self.node_manager, "get_live_network_validators"):
+            return
+        try:
+            live_validators = self.node_manager.get_live_network_validators()
+            if not live_validators:
+                return
+            with self.db_manager.get_session() as session:
+                # Remove dummy seeded validators (qie1validator0aaaa...) if present
+                session.query(Validator).filter(
+                    Validator.address.like("qie1validator%")
+                ).delete(synchronize_session=False)
+
+                for v_data in live_validators:
+                    addr = v_data["address"]
+                    existing = session.query(Validator).filter_by(address=addr).first()
+                    if existing is None:
+                        session.add(Validator(
+                            address=addr,
+                            name=v_data["name"],
+                            stake_amount=float(v_data["stake_amount"]),
+                            uptime_percentage=float(v_data["uptime_percentage"]),
+                            is_active=bool(v_data["is_active"]),
+                        ))
+                    else:
+                        existing.name = v_data["name"]
+                        existing.stake_amount = float(v_data["stake_amount"])
+                        existing.uptime_percentage = float(v_data["uptime_percentage"])
+                        existing.is_active = bool(v_data["is_active"])
+        except Exception as exc:
+            logger.debug(f"Live validator sync skipped: {exc}")
+
+    def _fetch_explorer_recent_txs(self) -> Iterable[Dict[str, Any]]:
+        """Fetch recent confirmed transactions from QIE Explorer API v2."""
+        if not hasattr(self.node_manager, "get_explorer_recent_transactions"):
+            return []
+        try:
+            txs = self.node_manager.get_explorer_recent_transactions(limit=25)
+            # Process oldest-first so rolling baseline builds in chronological order
+            return list(reversed(txs))
+        except Exception as exc:
+            logger.debug(f"Explorer recent txs fetch failed: {exc}")
+            return []
+
     def process_raw_transaction(
         self, raw_tx: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
         """Process one externally supplied transaction through the worker path."""
         return self._handle_raw({**raw_tx, "_source": raw_tx.get("_source", "mempool")})
 
-    # -- internals ---------------------------------------------------------
-
     def _handle_raw(self, raw_tx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """
-        De-duplicate by tx_hash, normalize, score, and persist a single raw tx.
-
-        Returns the final normalized+scored dict if it is new and was processed,
-        else None (duplicate, empty hash, or persistence skipped on conflict).
-        """
-        # Tag the source so normalize_transaction can set status correctly.
+        """De-duplicate by tx_hash, normalize, score, and persist a single raw tx."""
         if "_source" not in raw_tx:
             raw_tx = dict(raw_tx)
             raw_tx["_source"] = (
@@ -577,14 +582,10 @@ class IngestionWorker:
             with self.db_manager.get_session() as session:
                 existing = session.query(Transaction).filter_by(tx_hash=tx_hash).first()
                 if existing is not None and existing.status == TransactionStatus.CONFIRMED:
+                    self._seen_hashes.add(tx_hash)
                     return None
-        # Optimistically mark seen so a later per-tx failure doesn't cause us
-        # to retry the same hash every loop. If persistence fails with a
-        # duplicate IntegrityError we keep it marked seen (correct behavior).
         self._seen_hashes.add(tx_hash)
 
-        # Score and persist through the canonical path. Its DB session commits
-        # before this callback can emit dashboard events.
         persisted = self._persist_transaction(normalized)
         if persisted is None:
             return None
@@ -611,22 +612,36 @@ class IngestionWorker:
     def _persist_transaction(
         self, normalized: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
-        """
-        Persist Transaction + AnomalyDetection + (optional) Alert rows using
-        the same DatabaseManager.get_session() context manager pattern as
-        app.py.
-
-        Returns the canonical scoring/persistence result.
-        """
+        """Persist Transaction + AnomalyDetection + (optional) Alert rows."""
         try:
             with self.db_manager.get_session() as session:
-                # Map status string -> TransactionStatus enum.
                 status_str = normalized.get("status") or "pending"
                 status_enum = (
                     TransactionStatus.CONFIRMED if status_str == "confirmed"
                     else TransactionStatus.FAILED if status_str == "failed"
                     else TransactionStatus.PENDING
                 )
+
+                # If transaction came from a live QIE contract/bridge route, ensure Bridge row exists
+                bridge_id = normalized.get("bridge_id")
+                bridge_addr = normalized.get("bridge_address")
+                bridge_chain = normalized.get("bridge_chain_name")
+                if (
+                    bridge_id is None
+                    and bridge_addr
+                    and bridge_chain
+                    and self._is_public_qie_gateway()
+                ):
+                    bridge = session.query(Bridge).filter_by(address=bridge_addr).first()
+                    if bridge is None:
+                        bridge = Bridge(
+                            address=bridge_addr,
+                            chain_name=str(bridge_chain)[:50],
+                            status=BridgeStatus.ACTIVE,
+                        )
+                        session.add(bridge)
+                        session.flush()
+                    bridge_id = bridge.id
 
                 result = score_and_persist_transaction(
                     session=session,
@@ -639,28 +654,20 @@ class IngestionWorker:
                     receiver=normalized.get("receiver"),
                     timestamp=normalized.get("timestamp") or datetime.utcnow(),
                     status=status_enum,
-                    bridge_id=normalized.get("bridge_id"),
+                    bridge_id=bridge_id,
                 )
 
             return result
         except IntegrityError as exc:
-            # Duplicate tx_hash — the unique constraint fired. Skip + log; do
-            # NOT crash the loop. The tx is already in _seen_hashes so we
-            # won't retry it next iteration.
             logger.warning("Duplicate tx_hash skipped: %s (%s)", normalized.get("tx_hash"), exc.orig)
             return None
 
     def _fast_rpc_call(self, method: str) -> Dict[str, Any]:
-        """Make a one-shot Tendermint worker RPC call; polling supplies the retry loop."""
+        """Make a one-shot Tendermint worker RPC call."""
         return self.node_manager.rpc_call(method, timeout=3)
 
     def _fetch_mempool_txs(self) -> Iterable[Dict[str, Any]]:
-        """
-        Fetch unconfirmed transactions from the Tendermint mempool via QIENodeManager.
-
-        Uses a one-shot 3-second RPC request. The worker loop handles retry and
-        backoff so a dead node cannot inherit the manager's setup retry policy.
-        """
+        """Fetch unconfirmed transactions from the Tendermint mempool via QIENodeManager."""
         try:
             result = self._fast_rpc_call("unconfirmed_txs")
         except Exception as exc:
@@ -668,7 +675,6 @@ class IngestionWorker:
             return []
         if not result:
             return []
-        # Tendermint shape: {"n_txs": "1", "txs": ["<base64>", ...]}
         txs = result.get("txs") or []
         out: List[Dict[str, Any]] = []
         for entry in txs:
@@ -676,9 +682,7 @@ class IngestionWorker:
         return out
 
     def _fetch_latest_block_txs(self) -> Iterable[Dict[str, Any]]:
-        """
-        Fetch transactions from the latest Tendermint block via QIENodeManager.
-        """
+        """Fetch transactions from the latest Tendermint block via QIENodeManager."""
         try:
             block = self._fast_rpc_call("block")
         except Exception as exc:
@@ -704,10 +708,7 @@ class IngestionWorker:
         return out
 
     def _fetch_evm_mempool_txs(self) -> Iterable[Dict[str, Any]]:
-        """
-        Fetch pending transactions from the EVM mempool via QIENodeManager
-        when the node manager provides standard EVM JSON-RPC support.
-        """
+        """Fetch pending transactions from the EVM mempool via QIENodeManager."""
         if not hasattr(self.node_manager, "get_evm_pending_transactions"):
             return []
         try:
@@ -723,61 +724,54 @@ class IngestionWorker:
 
     def _fetch_evm_latest_block_txs(self) -> Iterable[Dict[str, Any]]:
         """
-        Fetch confirmed transactions from the latest EVM block via QIENodeManager
-        when the node manager provides standard EVM JSON-RPC support.
+        Fetch confirmed transactions from recent EVM blocks via QIENodeManager,
+        scanning any blocks missed since the previous poll iteration.
         """
         if not hasattr(self.node_manager, "get_evm_latest_block"):
             return []
         try:
-            block_info = self.node_manager.get_evm_latest_block(
+            latest_info = self.node_manager.get_evm_latest_block(
                 full_transactions=True, timeout=2
             )
         except Exception as exc:
             logger.debug("EVM block RPC unavailable: %s", exc)
             return []
-        if not isinstance(block_info, dict) or not block_info.get("found"):
+        if not isinstance(latest_info, dict) or not latest_info.get("found"):
             return []
-        height = block_info.get("height")
-        block_time = block_info.get("timestamp")
-        txs = block_info.get("transactions") or []
+
+        current_height = int(latest_info.get("height") or 0)
+        blocks_to_process = [latest_info]
+
+        if (
+            self._last_evm_block_height is not None
+            and current_height > self._last_evm_block_height + 1
+            and hasattr(self.node_manager, "get_evm_block_by_number")
+        ):
+            start_h = max(self._last_evm_block_height + 1, current_height - 4)
+            for h in range(start_h, current_height):
+                try:
+                    blk = self.node_manager.get_evm_block_by_number(
+                        h, full_transactions=True, timeout=2
+                    )
+                    if isinstance(blk, dict) and blk.get("found"):
+                        blocks_to_process.insert(-1, blk)
+                except Exception:
+                    pass
+
+        if current_height > 0:
+            self._last_evm_block_height = current_height
+
         out: List[Dict[str, Any]] = []
-        for tx in txs:
-            if isinstance(tx, dict):
-                out.append({
-                    **tx,
-                    "_source": "block",
-                    "height": height,
-                    "timestamp": tx.get("timestamp") or block_time,
-                })
+        for block_info in blocks_to_process:
+            height = block_info.get("height")
+            block_time = block_info.get("timestamp")
+            txs = block_info.get("transactions") or []
+            for tx in txs:
+                if isinstance(tx, dict):
+                    out.append({
+                        **tx,
+                        "_source": "block",
+                        "height": height,
+                        "timestamp": tx.get("timestamp") or block_time,
+                    })
         return out
-
-
-# ---------------------------------------------------------------------------
-# Manual / smoke entrypoint
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    # Run a few iterations against whatever QIE_RPC_URL points at, printing
-    # normalized+scored txs. Useful for isolated manual testing without Flask.
-    logging.basicConfig(level=logging.INFO)
-
-    def _print_tx(tx: Dict[str, Any]) -> None:
-        ts = tx.get("timestamp")
-        ts = ts.isoformat() if isinstance(ts, datetime) else ts
-        print({
-            "tx_hash": tx.get("tx_hash"),
-            "sender": tx.get("sender"),
-            "receiver": tx.get("receiver"),
-            "value": tx.get("value"),
-            "status": tx.get("status"),
-            "anomaly_score": tx.get("anomaly_score"),
-            "is_flagged": tx.get("is_flagged"),
-            "timestamp": ts,
-        })
-
-    worker = IngestionWorker(on_new_transaction=_print_tx)
-    print("Polling QIE for transactions (Ctrl+C to stop)...")
-    try:
-        worker.run()
-    except KeyboardInterrupt:
-        worker.stop()
