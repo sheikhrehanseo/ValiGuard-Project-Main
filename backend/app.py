@@ -351,10 +351,10 @@ def _compute_bridge_analytics(session) -> Dict[str, Any]:
     Aggregate real bridge counts and cross-chain route telemetry from the
     Bridge and Transaction tables.
     """
-    bridges_total = session.query(Bridge).count()
-    active_bridges = session.query(Bridge).filter(
+    bridges_total = int(session.query(Bridge).count() or 0)
+    active_bridges = int(session.query(Bridge).filter(
         Bridge.status == BridgeStatus.ACTIVE
-    ).count()
+    ).count() or 0)
 
     route_map: Dict[str, Dict[str, Any]] = {}
 
@@ -1021,23 +1021,23 @@ def get_daily_stats():
     next_date = target_date + timedelta(days=1)
 
     with db_manager.get_session() as session:
-        total_transactions = session.query(Transaction).filter(
+        total_transactions = int(session.query(Transaction).filter(
             Transaction.timestamp >= target_date,
             Transaction.timestamp < next_date
-        ).count()
+        ).count() or 0)
 
-        anomalies_detected = session.query(AnomalyDetection).filter(
+        anomalies_detected = int(session.query(AnomalyDetection).filter(
             AnomalyDetection.detected_at >= target_date,
             AnomalyDetection.detected_at < next_date
-        ).count()
+        ).count() or 0)
 
         # Compute validation success rate: (non-flagged / total) * 100.
         # No transactions for the day -> None (honest empty state, not 100%).
-        flagged_count = session.query(Transaction).filter(
+        flagged_count = int(session.query(Transaction).filter(
             Transaction.timestamp >= target_date,
             Transaction.timestamp < next_date,
             Transaction.is_flagged == True
-        ).count()
+        ).count() or 0)
         validation_success_rate = (
             round(((total_transactions - flagged_count) / total_transactions) * 100, 2)
             if total_transactions > 0
@@ -1162,11 +1162,19 @@ def _probe_node_telemetry() -> Dict[str, Any]:
         "rpc_url": qie_manager.rpc_url,
     }
     try:
-        response = requests.post(
-            qie_manager.rpc_url,
-            json={"jsonrpc": "2.0", "id": 1, "method": "status", "params": {}},
-            timeout=3,
-        )
+        try:
+            response = requests.post(
+                qie_manager.rpc_url,
+                json={"jsonrpc": "2.0", "id": 1, "method": "status", "params": {}},
+                timeout=3,
+            )
+        except requests.exceptions.SSLError:
+            response = requests.post(
+                qie_manager.rpc_url,
+                json={"jsonrpc": "2.0", "id": 1, "method": "status", "params": {}},
+                timeout=3,
+                verify=False,
+            )
         response.raise_for_status()
         payload = response.json() or {}
         result = payload.get("result", {}) or {}
@@ -1183,11 +1191,19 @@ def _probe_node_telemetry() -> Dict[str, Any]:
 
         # Fallback for Public EVM JSON-RPC endpoints (e.g. https://rpc1testnet.qie.digital)
         evm_url = getattr(qie_manager, "evm_rpc_url", None) or qie_manager.rpc_url
-        evm_response = requests.post(
-            evm_url,
-            json={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []},
-            timeout=3,
-        )
+        try:
+            evm_response = requests.post(
+                evm_url,
+                json={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []},
+                timeout=3,
+            )
+        except requests.exceptions.SSLError:
+            evm_response = requests.post(
+                evm_url,
+                json={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []},
+                timeout=3,
+                verify=False,
+            )
         evm_response.raise_for_status()
         hex_height = (evm_response.json() or {}).get("result")
         if isinstance(hex_height, str) and hex_height.startswith(("0x", "0X")):
@@ -1209,9 +1225,7 @@ def _probe_node_telemetry() -> Dict[str, Any]:
 def _fetch_node_telemetry() -> Dict[str, Any]:
     """
     Live node telemetry for the analytics endpoints, cached for
-    NODE_TELEMETRY_TTL_SECONDS. Never raises: when the QIE node is
-    unreachable, returns available=False with neutral values so analytics
-    still serve DB aggregates.
+    NODE_TELEMETRY_TTL_SECONDS.
     """
     now = time.time()
     if (
@@ -1225,26 +1239,16 @@ def _fetch_node_telemetry() -> Dict[str, Any]:
     return data
 
 
-_voting_power_cache: Dict[str, Any] = {"data": {}, "fetched_at": 0.0}
-
-
 def _fetch_chain_voting_power() -> Dict[str, float]:
-    """Return chain-reported voting power as percentages keyed by address (cached for 30s)."""
-    now = time.time()
-    if (
-        _voting_power_cache["data"]
-        and now - _voting_power_cache["fetched_at"] < NODE_TELEMETRY_TTL_SECONDS
-    ):
-        return _voting_power_cache["data"]
-
+    """Return chain-reported voting power as percentages keyed by address."""
     try:
         result = qie_manager.get_validator_set()
     except Exception as exc:  # noqa: BLE001 — DB fallback must remain available
         logger.debug("Validator-set RPC failed: %s", exc)
-        return _voting_power_cache["data"] or {}
+        return {}
 
     if not result.get("success"):
-        return _voting_power_cache["data"] or {}
+        return {}
 
     raw_values = {}
     for validator in result.get("validators", []):
@@ -1263,15 +1267,11 @@ def _fetch_chain_voting_power() -> Dict[str, float]:
 
     total_power = sum(raw_values.values())
     if total_power <= 0:
-        return _voting_power_cache["data"] or {}
-
-    data = {
+        return {}
+    return {
         address: round(power / total_power * 100, 2)
         for address, power in raw_values.items()
     }
-    _voting_power_cache["data"] = data
-    _voting_power_cache["fetched_at"] = now
-    return data
 
 
 @app.route("/api/v1/analytics/validator-stats", methods=["GET"])
