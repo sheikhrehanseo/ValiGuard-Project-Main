@@ -12,6 +12,7 @@ import {
     User,
     Menu,
     ChevronRight,
+    ChevronLeft,
     TrendingUp,
     Boxes,
     Newspaper,
@@ -20,12 +21,13 @@ import {
     RefreshCw,
     X,
     Lock,
-    Wallet
+    Wallet,
+    CheckSquare
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 import WalletConnect from '../components/WalletConnect';
-import { authedFetch, isAuthenticated } from '../lib/api';
+import { authedFetch, isAuthenticated, getToken } from '../lib/api';
 import { io } from 'socket.io-client';
 import { Line, Bar } from 'react-chartjs-2';
 import {
@@ -61,10 +63,25 @@ const SEVERITY_STYLES = {
     low: { bg: 'bg-blue-500/10', border: 'border-blue-500/50', text: 'text-blue-400', icon: CheckCircle, label: 'Normal' },
 };
 
+const TX_PAGE_SIZE = 15;
+const BRIDGE_PAGE_SIZE = 5;
+const VALIDATOR_PAGE_SIZE = 6;
+
+function parseUtcDate(timestamp) {
+    if (!timestamp) return null;
+    if (timestamp instanceof Date) return timestamp;
+    let str = String(timestamp).trim();
+    // SQLite/Python isoformat() omits 'Z' on UTC datetimes; append 'Z' so browser parses as UTC
+    if (/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}/.test(str) && !str.endsWith('Z') && !/[+-]\d{2}:?\d{2}$/.test(str)) {
+        str = str.replace(' ', 'T') + 'Z';
+    }
+    const parsed = new Date(str);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 function formatTimeAgo(timestamp) {
-    if (!timestamp) return '—';
-    const parsed = new Date(timestamp);
-    if (Number.isNaN(parsed.getTime())) return '—';
+    const parsed = parseUtcDate(timestamp);
+    if (!parsed) return '—';
 
     const seconds = Math.max(0, Math.floor((Date.now() - parsed.getTime()) / 1000));
     if (seconds < 60) return `${seconds}s ago`;
@@ -73,6 +90,38 @@ function formatTimeAgo(timestamp) {
     const hours = Math.floor(minutes / 60);
     if (hours < 24) return `${hours}h ago`;
     return `${Math.floor(hours / 24)}d ago`;
+}
+
+function deriveOnChainTxType(tx) {
+    if (tx.raw_entry) return 'Raw Consensus Tx';
+    const src = String(tx.source_chain || '').trim();
+    const s = src.toLowerCase();
+    const dst = String(tx.destination_chain || 'QIE').trim();
+    const val = Number(tx.value ?? tx.amount ?? 0);
+
+    if (s.includes('oracle')) return 'Oracle Update';
+    if (s.includes('prediction') || s.includes('broq')) return 'Prediction Contract';
+    if (s.includes('qiedex') || s.includes('qidex') || s.includes('liquidity') || s.includes('-lp') || s.includes('swap')) return 'DEX Swap / LP';
+    if (s.includes('token') || s.includes('weth') || s.includes('wbnb') || s.includes('usdt') || s.includes('usdc') || s.includes('wqie') || s.includes('qusd') || s.includes('([a-z0-9]+)')) {
+        if (src.includes('(') && src.includes(')') && !s.includes('contract')) return 'Token Transfer';
+    }
+    if (s.includes('token')) return 'Token Transfer';
+    if (s.includes('native')) return val > 0 ? 'Native Transfer' : 'Smart Contract Call';
+    if (s.includes('contract')) return 'Smart Contract Call';
+    if (src in { Ethereum: 1, BSC: 1, Polygon: 1, Avalanche: 1 }) {
+        return `${src} → ${dst}`;
+    }
+    return val > 0 ? 'Token Transfer' : 'Smart Contract Call';
+}
+
+function formatTxAmount(value, rawEntry = false, assetSymbol = null) {
+    if (rawEntry || value == null) return '—';
+    const num = Number(value);
+    if (Number.isNaN(num)) return '—';
+    const unit = assetSymbol || 'unknown asset';
+    if (num === 0) return `0 ${unit}`;
+    if (num < 0.01) return `${num.toFixed(4)} ${unit}`;
+    return `${num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })} ${unit}`;
 }
 
 function generateLast7DaysVolumeHistory() {
@@ -104,10 +153,9 @@ export default function Dashboard() {
     const [sidebarOpen, setSidebarOpen] = useState(true);
     const [selectedNews, setSelectedNews] = useState(null);
 
-    // Feature Toggle: REAL is the default. MOCK survives ONLY behind NEXT_PUBLIC_DEMO_MODE=true.
     const [dataSource, setDataSource] = useState(isDemoModeEnabled ? 'MOCK' : 'REAL');
     const [walletAddress, setWalletAddress] = useState(null);
-    const [backendStatus, setBackendStatus] = useState('unknown'); // 'online', 'offline', 'unknown'
+    const [backendStatus, setBackendStatus] = useState('unknown');
 
     // Validator & Node State
     const [stats, setStats] = useState({
@@ -135,14 +183,21 @@ export default function Dashboard() {
         top_validators: []
     });
 
-    // Live WebSocket & Transaction State
+    // Live WebSocket & Paginated Transaction State
     const [liveAlerts, setLiveAlerts] = useState([]);
     const [transactions, setTransactions] = useState([]);
-    const [pipelineLatency, setPipelineLatency] = useState(42);
-    const [peakTps, setPeakTps] = useState(28.4);
+    const [txPage, setTxPage] = useState(1);
+    const [txTotal, setTxTotal] = useState(0);
+
+    // Pagination for Bridge Routes & Validators
+    const [bridgePage, setBridgePage] = useState(1);
+    const [validatorPage, setValidatorPage] = useState(1);
+
+    const [pipelineLatency, setPipelineLatency] = useState(null);
+    const [peakTps, setPeakTps] = useState(null);
     const [, setAgeTick] = useState(Date.now());
 
-    // Alerts Tab Search & History
+    // Alerts Tab Search, History & Multi-Select State
     const [alertHistory, setAlertHistory] = useState([]);
     const [alertFilterSeverity, setAlertFilterSeverity] = useState('');
     const [alertFilterResolved, setAlertFilterResolved] = useState('');
@@ -150,6 +205,7 @@ export default function Dashboard() {
     const [alertFilterFrom, setAlertFilterFrom] = useState('');
     const [alertFilterTo, setAlertFilterTo] = useState('');
     const [alertsLoading, setAlertsLoading] = useState(false);
+    const [selectedAlertIds, setSelectedAlertIds] = useState([]);
 
     useEffect(() => {
         setMounted(true);
@@ -180,24 +236,50 @@ export default function Dashboard() {
                     }));
                 }
             } else {
-                // Check lightweight /health endpoint before declaring entire backend offline
                 const healthRes = await fetch(`${API_BASE}/health`).catch(() => null);
-                if (healthRes && healthRes.ok) {
-                    setBackendStatus('online');
-                } else {
-                    setBackendStatus('offline');
-                }
+                setBackendStatus(healthRes && healthRes.ok ? 'online' : 'offline');
             }
         } catch (error) {
             const healthRes = await fetch(`${API_BASE}/health`).catch(() => null);
-            if (healthRes && healthRes.ok) {
-                setBackendStatus('online');
-            } else {
-                console.warn("Backend API unreachable:", error);
-                setBackendStatus('offline');
-            }
+            setBackendStatus(healthRes && healthRes.ok ? 'online' : 'offline');
         }
     }, []);
+
+    // Fetch paginated transaction history from backend
+    const fetchTransactionPage = useCallback(async (pageToFetch = txPage) => {
+        if (dataSource === 'MOCK') return;
+        const authed = typeof window !== 'undefined' && (!!walletAddress || isAuthenticated());
+        if (!authed) return;
+
+        try {
+            const offset = (pageToFetch - 1) * TX_PAGE_SIZE;
+            const histRes = await authedFetch(`/api/v1/bridge/history?limit=${TX_PAGE_SIZE}&offset=${offset}`);
+            if (histRes.ok) {
+                const histData = await histRes.json();
+                if (histData.success && Array.isArray(histData.data?.transactions)) {
+                    setTxTotal(histData.data.total ?? histData.data.transactions.length);
+                    const mappedTxs = histData.data.transactions.map(tx => {
+                        const txHash = tx.tx_hash || tx.transaction_hash || '';
+                        const value = tx.value ?? tx.amount;
+                        return {
+                            hash: txHash ? `${txHash.substring(0, 10)}...` : '—',
+                            full_hash: txHash,
+                            type: deriveOnChainTxType(tx),
+                            timestamp: tx.timestamp || tx.created_at,
+                            from: tx.sender ? `${tx.sender.substring(0, 10)}...${tx.sender.slice(-4)}` : '—',
+                            amt: formatTxAmount(value, tx.raw_entry, tx.asset_symbol),
+                            severity: tx.severity,
+                            raw_entry: tx.raw_entry,
+                            status: tx.status || 'confirmed'
+                        };
+                    });
+                    setTransactions(mappedTxs);
+                }
+            }
+        } catch (err) {
+            console.warn("Transaction history fetch failed:", err);
+        }
+    }, [dataSource, walletAddress, txPage]);
 
     // Authenticated data fetcher (runs only when wallet is connected)
     const fetchProtectedRealData = useCallback(async () => {
@@ -208,12 +290,13 @@ export default function Dashboard() {
             setBackendStatus('online');
 
             // 1. Fetch Daily Stats
-            let statsData = null;
             const statsRes = await authedFetch('/api/v1/analytics/daily-stats');
+            let statsData = null;
             if (statsRes.ok) {
                 statsData = await statsRes.json();
                 if (statsData.success && statsData.data) {
                     setDailyStats(statsData.data);
+                    setPeakTps(statsData.data.peak_tps ?? null);
                     if (Array.isArray(statsData.data.bridge_routes)) {
                         setBridgeRoutes(statsData.data.bridge_routes);
                     }
@@ -226,7 +309,7 @@ export default function Dashboard() {
                 }
             }
 
-            // 2. Fetch Model Accuracy (scale 0..1 ratio to percentage)
+            // 2. Fetch Model Accuracy
             const modelRes = await authedFetch('/api/v1/analytics/model-accuracy');
             if (modelRes.ok) {
                 const modelData = await modelRes.json();
@@ -258,31 +341,10 @@ export default function Dashboard() {
                 }
             }
 
-            // 4. Fetch Transaction History
-            const histRes = await authedFetch('/api/v1/bridge/history?limit=15');
-            if (histRes.ok) {
-                const histData = await histRes.json();
-                if (histData.success && Array.isArray(histData.data?.transactions)) {
-                    const mappedTxs = histData.data.transactions.map(tx => {
-                        const txHash = tx.tx_hash || tx.transaction_hash || '';
-                        const value = tx.value ?? tx.amount;
-                        return {
-                            hash: txHash ? `${txHash.substring(0, 10)}...` : '—',
-                            full_hash: txHash,
-                            type: 'BridgeValidation',
-                            timestamp: tx.timestamp || tx.created_at,
-                            from: tx.sender || '—',
-                            amt: value == null ? '—' : `${value} QIE`,
-                            severity: tx.severity,
-                            raw_entry: tx.raw_entry,
-                            status: tx.status
-                        };
-                    });
-                    setTransactions(mappedTxs);
-                }
-            }
+            // 4. Fetch current page of Transaction History
+            await fetchTransactionPage(txPage);
 
-            // 5. Fetch Volume History for Traffic Chart (last 7 days — fetched once, then today's bar updated live)
+            // 5. Fetch Volume History for Traffic Chart (fetched once, then today's bar updated live)
             setVolumeHistory(prev => {
                 if (prev.length === 7 && statsData?.success && statsData?.data) {
                     const updated = [...prev];
@@ -323,17 +385,20 @@ export default function Dashboard() {
             }
 
         } catch (error) {
-            console.error("Protected telemetry fetch error:", error);
-            // Telemetry aggregation warning does not mark the entire backend API as offline
+            console.warn("Protected telemetry fetch warning:", error);
         }
-    }, [walletAddress, volumeHistory.length]);
+    }, [walletAddress, txPage, volumeHistory.length, fetchTransactionPage]);
+
+    // When user clicks a transaction page number in REAL mode, fetch immediately
+    useEffect(() => {
+        if (dataSource === 'REAL' && (walletAddress || isAuthenticated())) {
+            fetchTransactionPage(txPage);
+        }
+    }, [txPage, dataSource, walletAddress, fetchTransactionPage]);
 
     // Fetch Alerts with filter criteria
     const fetchFilteredAlerts = useCallback(async () => {
-        if (dataSource === 'MOCK') {
-            // In MOCK mode, client-side displayedAlerts handles instant filtering
-            return;
-        }
+        if (dataSource === 'MOCK') return;
         const authed = typeof window !== 'undefined' && (!!walletAddress || isAuthenticated());
         if (!authed) return;
 
@@ -356,18 +421,19 @@ export default function Dashboard() {
                 }
             }
         } catch (error) {
-            console.error("Failed to query alerts:", error);
+            console.warn("Failed to query alerts:", error);
         } finally {
             setAlertsLoading(false);
         }
     }, [dataSource, walletAddress, alertFilterSeverity, alertFilterResolved, alertFilterTxHash, alertFilterFrom, alertFilterTo]);
 
-    // Handle Alert Resolution
+    // Handle Single Alert Resolution
     const handleResolveAlert = async (alertId) => {
         if (!alertId) return;
         if (dataSource === 'MOCK') {
             setLiveAlerts(prev => prev.map(a => (a.id === alertId || a.alert_id === alertId) ? { ...a, is_resolved: true } : a));
             setAlertHistory(prev => prev.map(a => (a.id === alertId || a.alert_id === alertId) ? { ...a, is_resolved: true } : a));
+            setSelectedAlertIds(prev => prev.filter(id => id !== alertId));
             return;
         }
         try {
@@ -375,9 +441,37 @@ export default function Dashboard() {
             if (res.ok) {
                 setLiveAlerts(prev => prev.map(a => (a.id === alertId || a.alert_id === alertId) ? { ...a, is_resolved: true } : a));
                 setAlertHistory(prev => prev.map(a => (a.id === alertId || a.alert_id === alertId) ? { ...a, is_resolved: true } : a));
+                setSelectedAlertIds(prev => prev.filter(id => id !== alertId));
             }
         } catch (err) {
-            console.error("Failed to resolve alert:", err);
+            console.warn("Failed to resolve alert:", err);
+        }
+    };
+
+    // Handle Multi-Select Bulk Alert Resolution
+    const handleBulkResolveAlerts = async () => {
+        if (selectedAlertIds.length === 0) return;
+        const idsToResolve = [...selectedAlertIds];
+
+        if (dataSource === 'MOCK') {
+            setLiveAlerts(prev => prev.map(a => idsToResolve.includes(a.id ?? a.alert_id) ? { ...a, is_resolved: true } : a));
+            setAlertHistory(prev => prev.map(a => idsToResolve.includes(a.id ?? a.alert_id) ? { ...a, is_resolved: true } : a));
+            setSelectedAlertIds([]);
+            return;
+        }
+
+        try {
+            const res = await authedFetch('/api/v1/alerts/resolve-bulk', {
+                method: 'POST',
+                body: JSON.stringify({ alert_ids: idsToResolve }),
+            });
+            if (res.ok) {
+                setLiveAlerts(prev => prev.map(a => idsToResolve.includes(a.id ?? a.alert_id) ? { ...a, is_resolved: true } : a));
+                setAlertHistory(prev => prev.map(a => idsToResolve.includes(a.id ?? a.alert_id) ? { ...a, is_resolved: true } : a));
+                setSelectedAlertIds([]);
+            }
+        } catch (err) {
+            console.warn("Bulk alert resolution failed:", err);
         }
     };
 
@@ -386,7 +480,6 @@ export default function Dashboard() {
         let interval;
 
         if (dataSource === 'MOCK' && isDemoModeEnabled) {
-            // Deterministic Demo Simulation (deterministic tick)
             setBackendStatus('online');
             setNodeStatus({
                 synced: true,
@@ -416,14 +509,16 @@ export default function Dashboard() {
                 { chain: 'Avalanche', status: 'active', transactions: 100, volume: 13000.0, flagged: 0 }
             ]);
             setValidatorStats(prev => prev.total_validators ? prev : {
-                total_validators: 4,
-                active_validators: 4,
-                avg_uptime: 99.8,
+                total_validators: 6,
+                active_validators: 5,
+                avg_uptime: 99.4,
                 top_validators: [
-                    { address: 'qie1valoper1...89a', voting_power: '450,000', uptime: '99.9%', is_active: true, transactions: 520, alerts: 0 },
-                    { address: 'qie1valoper2...bc4', voting_power: '320,000', uptime: '99.8%', is_active: true, transactions: 410, alerts: 1 },
-                    { address: 'qie1valoper3...3ef', voting_power: '280,000', uptime: '99.7%', is_active: true, transactions: 340, alerts: 0 },
-                    { address: 'qie1valoper4...0d1', voting_power: '150,000', uptime: '99.5%', is_active: true, transactions: 150, alerts: 0 },
+                    { address: 'qie1valoper1...89a', name: 'Demo Validator Alpha', stake_amount: 45000, voting_power: 32.5, uptime: 99.9, source: 'demo', is_active: true, transactions: 520, alerts: 0 },
+                    { address: 'qie1valoper2...bc4', name: 'Demo Validator Beta', stake_amount: 32000, voting_power: 23.1, uptime: 99.8, source: 'demo', is_active: true, transactions: 410, alerts: 1 },
+                    { address: 'qie1valoper3...3ef', name: 'Demo Validator Gamma', stake_amount: 28000, voting_power: 20.2, uptime: 99.7, source: 'demo', is_active: true, transactions: 340, alerts: 0 },
+                    { address: 'qie1valoper4...0d1', name: 'Demo Validator Delta', stake_amount: 15000, voting_power: 10.8, uptime: 99.5, source: 'demo', is_active: true, transactions: 150, alerts: 0 },
+                    { address: 'qie1valoper5...7a2', name: 'Demo Validator Epsilon', stake_amount: 12000, voting_power: 8.7, uptime: 98.9, source: 'demo', is_active: true, transactions: 95, alerts: 0 },
+                    { address: 'qie1valoper6...9c3', name: 'Demo Standby Node', stake_amount: 6500, voting_power: 4.7, uptime: 89.2, source: 'demo', is_active: false, transactions: 20, alerts: 0 },
                 ]
             });
             const demoAlerts = [
@@ -470,7 +565,7 @@ export default function Dashboard() {
                 {
                     hash: '0x3a9f1b2c...',
                     full_hash: '0x3a9f1b2c7e8d9a0b1c2d3e4f5a6b7c8d',
-                    type: 'BridgeValidation',
+                    type: 'Native Transfer',
                     timestamp: new Date().toISOString(),
                     from: 'qie1a48c9...',
                     amt: '125.50 QIE',
@@ -480,45 +575,61 @@ export default function Dashboard() {
                 {
                     hash: '0x8b4c2e1f...',
                     full_hash: '0x8b4c2e1f9a0b1c2d3e4f5a6b7c8d9e0f',
-                    type: 'BridgeValidation',
+                    type: 'Token Transfer',
                     timestamp: new Date(Date.now() - 4000).toISOString(),
                     from: 'qie17ef02...',
                     amt: '1,420.00 QIE',
                     severity: 'high',
-                    status: 'confirmed'
+                    status: 'pending'
                 },
                 {
                     hash: '0x1c2d3e4f...',
                     full_hash: '0x1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f',
-                    type: 'BridgeValidation',
+                    type: 'Oracle Update',
                     timestamp: new Date(Date.now() - 9000).toISOString(),
                     from: 'qie1bc814...',
-                    amt: '45.00 QIE',
+                    amt: '0 QIE',
                     severity: 'low',
                     status: 'confirmed'
                 }
             ]);
-            let tick = 0;
+            setTxTotal(3);
+
+            const mockTxTypes = [
+                'Native Transfer',
+                'Token Transfer',
+                'Oracle Update',
+                'DEX Swap / LP',
+                'Prediction Contract',
+                'Smart Contract Call'
+            ];
+
             interval = setInterval(() => {
-                tick += 1;
                 setNodeStatus(prev => ({ ...prev, height: (prev.height || 1245000) + 1 }));
-                const mockTypes = ['low', 'low', 'low', 'medium', 'high', 'critical'];
-                const mockSev = mockTypes[Math.floor(Math.random() * mockTypes.length)];
+                const mockSevList = ['low', 'low', 'low', 'medium', 'high', 'critical'];
+                const mockSev = mockSevList[Math.floor(Math.random() * mockSevList.length)];
+                const chosenType = mockTxTypes[Math.floor(Math.random() * mockTxTypes.length)];
+                const isZeroValCall = chosenType === 'Oracle Update' || chosenType === 'Smart Contract Call';
+                const amtNum = isZeroValCall ? 0 : parseFloat((Math.random() * 450 + 10).toFixed(2));
                 const randomHex = Math.random().toString(16).substring(2, 10);
-                const amtNum = parseFloat((Math.random() * 450 + 10).toFixed(2));
+                const mockStatus = Math.random() < 0.25 ? 'pending' : 'confirmed';
+
                 const newTx = {
                     hash: `0x${randomHex}...`,
                     full_hash: `0x${randomHex}${Math.random().toString(16).substring(2, 24)}`,
-                    type: 'BridgeValidation',
+                    type: chosenType,
                     timestamp: new Date().toISOString(),
                     from: `qie1${Math.random().toString(36).substring(2, 7)}...`,
-                    amt: `${amtNum.toFixed(2)} QIE`,
+                    amt: amtNum === 0 ? '0 QIE' : `${amtNum.toFixed(2)} QIE`,
                     severity: mockSev,
-                    status: 'confirmed'
+                    status: mockStatus
                 };
-                setTransactions(prev => [newTx, ...prev.slice(0, 14)]);
+                setTransactions(prev => {
+                    const updated = [newTx, ...prev.slice(0, 59)];
+                    setTxTotal(updated.length);
+                    return updated;
+                });
 
-                // 1. Live Risk Distribution & Total Transactions
                 setDailyStats(prev => {
                     if (!prev) return prev;
                     const prevCounts = prev.severity_counts || { low: 0, medium: 0, high: 0, critical: 0 };
@@ -532,7 +643,6 @@ export default function Dashboard() {
                     };
                 });
 
-                // 2. Live Anomalies (24h) & Demo Alerts
                 if (mockSev === 'high' || mockSev === 'critical') {
                     setStats(prev => ({
                         ...prev,
@@ -554,7 +664,6 @@ export default function Dashboard() {
                     setAlertHistory(prev => [newAlert, ...prev].slice(0, 50));
                 }
 
-                // 3. Live 7-Day Transaction Volume Chart
                 setVolumeHistory(prev => {
                     if (!prev || prev.length === 0) return prev;
                     const updated = [...prev];
@@ -567,10 +676,8 @@ export default function Dashboard() {
                     return updated;
                 });
 
-                // 4. Update pipeline latency & peak TPS
                 setPipelineLatency(40 + Math.floor(Math.random() * 6));
 
-                // 5. Live Cross-Chain Bridge Routes
                 setBridgeRoutes(prev => {
                     if (!prev || prev.length === 0) return prev;
                     const idx = Math.floor(Math.random() * prev.length);
@@ -585,10 +692,8 @@ export default function Dashboard() {
                 });
             }, 3000);
         } else {
-            // REAL Mode: always fetch open node status
             fetchPublicNodeStatus();
 
-            // If authenticated, poll protected endpoints
             if (walletAddress || isAuthenticated()) {
                 fetchProtectedRealData();
                 fetchFilteredAlerts();
@@ -612,39 +717,58 @@ export default function Dashboard() {
         }
     }, [activeSection, walletAddress, fetchFilteredAlerts]);
 
-    // WebSocket live feed (REAL data source: open by design, stays active pre-auth)
+    // WebSocket live feed
     useEffect(() => {
-        if (dataSource !== 'REAL') return;
+        if (dataSource !== 'REAL' || !(walletAddress || isAuthenticated())) return;
 
         const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
-        const socket = io(API_BASE, { transports: ['websocket', 'polling'] });
+        let disposed = false;
+        const socket = io(API_BASE, {
+            transports: ['websocket', 'polling'],
+            auth: callback => callback({ token: getToken() }),
+        });
+        const recoverSocketAuth = async () => {
+            if (disposed || !getToken()) return;
+            const response = await authedFetch('/api/v1/auth/me').catch(() => null);
+            if (!disposed && response?.ok) socket.connect();
+        };
+        socket.on('connect_error', error => {
+            if (error.message === 'Connection rejected by server') recoverSocketAuth();
+        });
+        socket.on('disconnect', reason => {
+            if (reason === 'io server disconnect') recoverSocketAuth();
+        });
 
         socket.on('connect', () => {
             setBackendStatus('online');
         });
-        socket.on('disconnect', () => {
-            // socket disconnected
-        });
 
         socket.on('new_transaction', (tx) => {
-            setTransactions(prev => [{
+            const incomingRow = {
                 hash: tx.tx_hash ? `${tx.tx_hash.substring(0, 10)}...` : '—',
                 full_hash: tx.tx_hash,
-                type: 'BridgeValidation',
+                type: deriveOnChainTxType(tx),
                 timestamp: tx.timestamp || tx.created_at,
-                from: tx.sender || '—',
-                amt: tx.value == null ? '—' : `${tx.value} QIE`,
+                from: tx.sender ? `${tx.sender.substring(0, 10)}...${tx.sender.slice(-4)}` : '—',
+                amt: formatTxAmount(tx.value, tx.raw_entry, tx.asset_symbol),
                 severity: tx.severity,
                 raw_entry: tx.raw_entry,
-                status: tx.status,
-            }, ...prev.slice(0, 14)]);
+                status: tx.status || 'confirmed',
+            };
+
+            if (!tx.is_update) setTxTotal(prev => prev + 1);
+            setTransactions(prev => {
+                // Only prepend live WebSocket transactions when viewing Page 1
+                if (txPage !== 1) return prev;
+                const filtered = prev.filter(item => item.full_hash !== incomingRow.full_hash);
+                return [incomingRow, ...filtered].slice(0, TX_PAGE_SIZE);
+            });
 
             const sev = (tx.severity || 'low').toLowerCase();
-            const valNum = parseFloat(tx.value) || 0;
+            const valNum = tx.asset_symbol === 'QIE' && !tx.asset_address ? (parseFloat(tx.value) || 0) : 0;
 
-            // Live update to Risk Distribution & total transactions
             setDailyStats(prev => {
-                if (!prev) return prev;
+                if (!prev || tx.is_update) return prev;
                 const counts = prev.severity_counts || { low: 0, medium: 0, high: 0, critical: 0 };
                 return {
                     ...prev,
@@ -656,9 +780,8 @@ export default function Dashboard() {
                 };
             });
 
-            // Live update to today's volume on 7-day chart
             setVolumeHistory(prev => {
-                if (!prev || prev.length === 0) return prev;
+                if (!prev || prev.length === 0 || tx.is_update) return prev;
                 const updated = [...prev];
                 const lastIdx = updated.length - 1;
                 updated[lastIdx] = {
@@ -669,8 +792,7 @@ export default function Dashboard() {
                 return updated;
             });
 
-            // Live update to detection latency
-            setPipelineLatency(Math.floor(38 + Math.random() * 8));
+            setPipelineLatency(tx.inference_latency_ms ?? null);
         });
 
         socket.on('new_anomaly', (anomaly) => {
@@ -707,6 +829,7 @@ export default function Dashboard() {
                     ? { ...alert, is_resolved: true }
                     : alert
             )));
+            setSelectedAlertIds(prev => prev.filter(id => id !== resolved.alert_id));
         });
 
         socket.on('node_status', (ns) => {
@@ -717,16 +840,11 @@ export default function Dashboard() {
             }));
         });
 
-        return () => socket.disconnect();
-    }, [dataSource]);
+        return () => { disposed = true; socket.disconnect(); };
+    }, [dataSource, txPage, walletAddress]);
 
-    // Honest Derived Metrics
-    // In MOCK mode, telemetry is fully demonstrated for simulation.
-    // In REAL mode, historical analytics endpoints require UC-01 wallet authentication.
     const isAuthed = mounted && (dataSource === 'MOCK' || (typeof window !== 'undefined' && (!!walletAddress || isAuthenticated())));
-    const totalTransactions24h = dailyStats?.total_transactions ?? null;
 
-    // Real Severity Distribution Computations
     const severityCounts = dailyStats?.severity_counts || { low: 0, medium: 0, high: 0, critical: 0 };
     const totalSeverityDetections = (severityCounts.low || 0) + (severityCounts.medium || 0) + (severityCounts.high || 0) + (severityCounts.critical || 0);
 
@@ -739,15 +857,32 @@ export default function Dashboard() {
 
     const hasTrafficVolume = volumeHistory.some(v => v.count > 0);
 
-    // Active Filtered Alerts for UI display (works seamlessly across MOCK and REAL modes)
+    // Paginated slices for Transactions (in MOCK mode), Bridge Routes, and Validators
+    const totalTxPages = Math.max(1, Math.ceil((dataSource === 'MOCK' ? transactions.length : txTotal) / TX_PAGE_SIZE));
+    const displayedTransactions = dataSource === 'MOCK'
+        ? transactions.slice((txPage - 1) * TX_PAGE_SIZE, txPage * TX_PAGE_SIZE)
+        : transactions;
+
+    const totalBridgePages = Math.max(1, Math.ceil(bridgeRoutes.length / BRIDGE_PAGE_SIZE));
+    const displayedBridgeRoutes = bridgeRoutes.slice(
+        (bridgePage - 1) * BRIDGE_PAGE_SIZE,
+        bridgePage * BRIDGE_PAGE_SIZE
+    );
+
+    const allValidators = validatorStats.top_validators || [];
+    const totalValidatorPages = Math.max(1, Math.ceil(allValidators.length / VALIDATOR_PAGE_SIZE));
+    const displayedValidators = allValidators.slice(
+        (validatorPage - 1) * VALIDATOR_PAGE_SIZE,
+        validatorPage * VALIDATOR_PAGE_SIZE
+    );
+
+    // Active Filtered Alerts for UI display
     const displayedAlerts = useMemo(() => {
         const base = alertHistory.length > 0 ? alertHistory : liveAlerts;
         return base.filter(alert => {
-            // 1. Severity Filter
             if (alertFilterSeverity && (alert.severity || '').toLowerCase() !== alertFilterSeverity.toLowerCase()) {
                 return false;
             }
-            // 2. Status / Resolution Filter
             if (alertFilterResolved !== '') {
                 const isResolved = !!alert.is_resolved;
                 const wantResolved = alertFilterResolved === 'true';
@@ -755,7 +890,6 @@ export default function Dashboard() {
                     return false;
                 }
             }
-            // 3. Tx Hash Filter
             if (alertFilterTxHash.trim()) {
                 const term = alertFilterTxHash.trim().toLowerCase();
                 const hash = (alert.tx_hash || alert.transaction_hash || '').toLowerCase();
@@ -763,26 +897,45 @@ export default function Dashboard() {
                     return false;
                 }
             }
-            // 4. Date From Filter
             if (alertFilterFrom) {
-                const alertDate = new Date(alert.timestamp || alert.created_at);
+                const alertDate = parseUtcDate(alert.timestamp || alert.created_at);
                 const fromDate = new Date(alertFilterFrom);
-                if (!isNaN(alertDate.getTime()) && !isNaN(fromDate.getTime()) && alertDate < fromDate) {
+                if (alertDate && !isNaN(fromDate.getTime()) && alertDate < fromDate) {
                     return false;
                 }
             }
-            // 5. Date To Filter
             if (alertFilterTo) {
-                const alertDate = new Date(alert.timestamp || alert.created_at);
+                const alertDate = parseUtcDate(alert.timestamp || alert.created_at);
                 const toDate = new Date(alertFilterTo);
                 toDate.setHours(23, 59, 59, 999);
-                if (!isNaN(alertDate.getTime()) && !isNaN(toDate.getTime()) && alertDate > toDate) {
+                if (alertDate && !isNaN(toDate.getTime()) && alertDate > toDate) {
                     return false;
                 }
             }
             return true;
         });
     }, [alertHistory, liveAlerts, alertFilterSeverity, alertFilterResolved, alertFilterTxHash, alertFilterFrom, alertFilterTo]);
+
+    const unresolvedDisplayedIds = useMemo(
+        () => displayedAlerts.filter(a => !a.is_resolved && (a.id ?? a.alert_id)).map(a => a.id ?? a.alert_id),
+        [displayedAlerts]
+    );
+
+    const toggleSelectAlert = (alertId) => {
+        setSelectedAlertIds(prev =>
+            prev.includes(alertId) ? prev.filter(id => id !== alertId) : [...prev, alertId]
+        );
+    };
+
+    const toggleSelectAllUnresolved = () => {
+        if (unresolvedDisplayedIds.length === 0) return;
+        const allSelected = unresolvedDisplayedIds.every(id => selectedAlertIds.includes(id));
+        if (allSelected) {
+            setSelectedAlertIds(prev => prev.filter(id => !unresolvedDisplayedIds.includes(id)));
+        } else {
+            setSelectedAlertIds(prev => Array.from(new Set([...prev, ...unresolvedDisplayedIds])));
+        }
+    };
 
     return (
         <div className="flex h-screen bg-slate-900 text-slate-100 font-sans overflow-hidden">
@@ -875,14 +1028,12 @@ export default function Dashboard() {
 
                     <div className="flex items-center gap-4 ml-auto">
                         {/* Mode Status Ticker */}
-                        <div className={`flex items-center gap-2 bg-slate-900/80 border px-3 py-1.5 rounded-lg text-xs font-semibold mr-2 ${
-                            dataSource === 'MOCK'
-                                ? 'border-blue-500/30 text-blue-400'
-                                : 'border-emerald-500/30 text-emerald-400'
-                        }`}>
-                            <span className={`w-2 h-2 rounded-full animate-pulse ${
-                                dataSource === 'MOCK' ? 'bg-blue-400' : 'bg-emerald-400'
-                            }`}></span>
+                        <div className={`flex items-center gap-2 bg-slate-900/80 border px-3 py-1.5 rounded-lg text-xs font-semibold mr-2 ${dataSource === 'MOCK'
+                            ? 'border-blue-500/30 text-blue-400'
+                            : 'border-emerald-500/30 text-emerald-400'
+                            }`}>
+                            <span className={`w-2 h-2 rounded-full animate-pulse ${dataSource === 'MOCK' ? 'bg-blue-400' : 'bg-emerald-400'
+                                }`}></span>
                             {dataSource === 'MOCK' ? 'MOCK MODE' : 'REAL MODE'}
                         </div>
 
@@ -955,7 +1106,6 @@ export default function Dashboard() {
 
                                     {/* Charts Area */}
                                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                                        {/* 1. Transaction Volume Chart (backed by /api/v1/analytics/daily-stats) */}
                                         <div className="lg:col-span-2 bg-slate-800 rounded-2xl border border-slate-700 p-6 shadow-xl">
                                             <div className="flex justify-between items-center mb-4">
                                                 <h3 className="text-lg font-semibold text-white">Transaction Volume (Last 7 Days)</h3>
@@ -1023,7 +1173,6 @@ export default function Dashboard() {
                                             </div>
                                         </div>
 
-                                        {/* 2. Real Risk Distribution (computed from daily-stats severity_counts) */}
                                         <div className="bg-slate-800 rounded-2xl border border-slate-700 p-6 shadow-xl">
                                             <div className="flex justify-between items-center mb-4">
                                                 <h3 className="text-lg font-semibold text-white">Risk Distribution</h3>
@@ -1076,7 +1225,7 @@ export default function Dashboard() {
                                 </motion.div>
                             )}
 
-                            {/* TRANSACTIONS TAB */}
+                            {/* TRANSACTIONS TAB (15 per page with Pagination Controls) */}
                             {activeSection === 'transactions' && (
                                 <motion.div
                                     key="transactions"
@@ -1085,9 +1234,14 @@ export default function Dashboard() {
                                     exit={{ opacity: 0, y: -20 }}
                                     className="bg-slate-800 rounded-2xl border border-slate-700 overflow-hidden shadow-xl"
                                 >
-                                    <div className="p-6 border-b border-slate-700 flex justify-between items-center">
-                                        <h3 className="text-xl font-bold text-white">Transactions Feed</h3>
-                                        <span className="text-xs text-slate-400">Live WebSockets + History</span>
+                                    <div className="p-6 border-b border-slate-700 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                                        <div>
+                                            <h3 className="text-xl font-bold text-white">Transactions Feed</h3>
+                                            <span className="text-xs text-slate-400">
+                                                Showing {displayedTransactions.length} of {dataSource === 'MOCK' ? transactions.length : txTotal} transactions (Page {txPage} of {totalTxPages})
+                                            </span>
+                                        </div>
+                                        <span className="text-xs text-slate-400 font-mono">Live WebSockets + Paginated History</span>
                                     </div>
                                     <div className="overflow-x-auto">
                                         <table className="w-full text-left border-collapse">
@@ -1103,30 +1257,45 @@ export default function Dashboard() {
                                                 </tr>
                                             </thead>
                                             <tbody className="divide-y divide-slate-700">
-                                                {transactions.length === 0 ? (
+                                                {displayedTransactions.length === 0 ? (
                                                     <tr>
                                                         <td colSpan={7} className="p-8 text-center text-slate-400">
                                                             No transactions recorded yet. Transactions will appear in real time as processed.
                                                         </td>
                                                     </tr>
                                                 ) : (
-                                                    transactions.map((tx, i) => (
+                                                    displayedTransactions.map((tx, i) => (
                                                         <tr key={tx.full_hash || i} className="hover:bg-slate-700/30 transition-colors">
-                                                            <td className="p-4 font-mono text-blue-400">{tx.hash}</td>
-                                                            <td className="p-4"><span className="px-2 py-1 rounded bg-slate-700 text-xs">{tx.type}</span></td>
-                                                            <td className="p-4 text-slate-400">{formatTimeAgo(tx.timestamp)}</td>
-                                                            <td className="p-4 font-mono text-slate-400">{tx.from}</td>
-                                                            <td className="p-4 font-medium">{tx.amt}</td>
+                                                            <td className="p-4 font-mono text-blue-400" title={tx.full_hash}>{tx.hash}</td>
                                                             <td className="p-4">
-                                                                <div className="flex items-center gap-1">
+                                                                <span className="px-2.5 py-1 rounded-md bg-slate-700/80 border border-slate-600/50 text-xs font-medium text-slate-200">
+                                                                    {tx.type}
+                                                                </span>
+                                                            </td>
+                                                            <td className="p-4 text-slate-400 font-mono text-xs">{formatTimeAgo(tx.timestamp)}</td>
+                                                            <td className="p-4 font-mono text-slate-400 text-xs">{tx.from}</td>
+                                                            <td className="p-4 font-medium font-mono text-sm">{tx.amt}</td>
+                                                            <td className="p-4">
+                                                                <div className="flex items-center gap-1.5">
                                                                     {tx.raw_entry && (
-                                                                        <span className="px-2 py-1 rounded bg-slate-700 text-slate-300 text-xs font-semibold">RAW</span>
+                                                                        <span className="px-2 py-0.5 rounded bg-slate-700 text-slate-300 border border-slate-600 text-xs font-semibold">
+                                                                            RAW
+                                                                        </span>
                                                                     )}
                                                                     {tx.status === 'pending' && (
-                                                                        <span className="px-2 py-1 rounded bg-amber-500/20 text-amber-400 text-xs font-semibold animate-pulse">PENDING</span>
+                                                                        <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-400 border border-amber-500/30 text-xs font-semibold animate-pulse">
+                                                                            PENDING
+                                                                        </span>
                                                                     )}
-                                                                    {!tx.raw_entry && tx.status !== 'pending' && (
-                                                                        <span className="text-slate-500">—</span>
+                                                                    {tx.status === 'failed' && (
+                                                                        <span className="px-2 py-0.5 rounded bg-red-500/20 text-red-400 border border-red-500/30 text-xs font-semibold">
+                                                                            FAILED
+                                                                        </span>
+                                                                    )}
+                                                                    {!tx.raw_entry && tx.status !== 'pending' && tx.status !== 'failed' && (
+                                                                        <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 text-xs font-semibold">
+                                                                            CONFIRMED
+                                                                        </span>
                                                                     )}
                                                                 </div>
                                                             </td>
@@ -1143,10 +1312,17 @@ export default function Dashboard() {
                                             </tbody>
                                         </table>
                                     </div>
+
+                                    {/* Pagination Footer */}
+                                    <PaginationControls
+                                        currentPage={txPage}
+                                        totalPages={totalTxPages}
+                                        onPageChange={setTxPage}
+                                    />
                                 </motion.div>
                             )}
 
-                            {/* VALIDATORS TAB (backed by /api/v1/analytics/validator-stats) */}
+                            {/* VALIDATORS TAB (All Online & Offline Validators + Pagination) */}
                             {activeSection === 'validators' && (
                                 <motion.div
                                     key="validators"
@@ -1154,8 +1330,15 @@ export default function Dashboard() {
                                     animate={{ opacity: 1 }}
                                     className="space-y-6"
                                 >
-                                    <div className="flex justify-between items-center">
-                                        <h3 className="text-xl font-bold text-white">Network Validators</h3>
+                                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                                        <div>
+                                            <h3 className="text-xl font-bold text-white">Network Validators</h3>
+                                            {isAuthed && allValidators.length > 0 && (
+                                                <p className="text-xs text-slate-400 mt-0.5">
+                                                    {validatorStats.active_validators ?? 0} Active (Online) • {(validatorStats.total_validators ?? allValidators.length) - (validatorStats.active_validators ?? 0)} Standby (Offline) • Avg Uptime: {validatorStats.avg_uptime ?? 0}%
+                                                </p>
+                                            )}
+                                        </div>
                                         <span className="text-xs text-slate-400 font-mono">/api/v1/analytics/validator-stats</span>
                                     </div>
 
@@ -1173,63 +1356,73 @@ export default function Dashboard() {
                                                 Connect Wallet
                                             </button>
                                         </div>
-                                    ) : (!validatorStats.top_validators || validatorStats.top_validators.length === 0) ? (
+                                    ) : allValidators.length === 0 ? (
                                         <div className="bg-slate-800 p-12 rounded-2xl border border-slate-700 text-center text-slate-400">
-                                            No validators found in the database.
+                                            Synchronizing QIE network validators...
                                         </div>
                                     ) : (
-                                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                                            {validatorStats.top_validators.map((v, i) => (
-                                                <div key={v.address || i} className="bg-slate-800 p-6 rounded-2xl border border-slate-700 hover:border-blue-500/50 transition-all">
-                                                    <div className="flex items-center justify-between mb-4">
-                                                        <div className="flex items-center gap-3">
-                                                            <div className="w-10 h-10 rounded-full bg-slate-700 flex items-center justify-center text-lg">
-                                                                🛡️
-                                                            </div>
-                                                            <div>
-                                                                <h4 className="font-bold text-white">{v.name || `Validator ${i + 1}`}</h4>
-                                                                <div className="text-xs text-slate-400 font-mono">
-                                                                    {(v.address || '').substring(0, 10)}...{(v.address || '').slice(-4)}
+                                        <>
+                                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                                {displayedValidators.map((v, i) => (
+                                                    <div key={v.address || i} className="bg-slate-800 p-6 rounded-2xl border border-slate-700 hover:border-blue-500/50 transition-all">
+                                                        <div className="flex items-center justify-between mb-4">
+                                                            <div className="flex items-center gap-3">
+                                                                <div className="w-10 h-10 rounded-full bg-slate-700 flex items-center justify-center text-lg">
+                                                                    🛡️
+                                                                </div>
+                                                                <div>
+                                                                    <h4 className="font-bold text-white">{v.name || `Validator ${i + 1}`}</h4>
+                                                                    <div className="text-xs text-slate-400 font-mono" title={v.address}>
+                                                                        {(v.address || '').substring(0, 10)}...{(v.address || '').slice(-4)}
+                                                                    </div>
                                                                 </div>
                                                             </div>
+                                                            <div className="flex items-center gap-1.5">
+                                                                <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-slate-900 text-slate-300 border border-slate-700" title={`Voting power source: ${v.source}`}>
+                                                                    {v.source || 'rpc'}
+                                                                </span>
+                                                                <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${v.is_active ? 'bg-green-500/10 text-green-400 border border-green-500/20' : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'}`}>
+                                                                    {v.is_active ? 'Online' : 'Offline'}
+                                                                </span>
+                                                            </div>
                                                         </div>
-                                                        <div className="flex items-center gap-1.5">
-                                                            {/* Honesty badge for voting power source (rpc | db) */}
-                                                            <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-slate-900 text-slate-300 border border-slate-700" title={`Voting power source: ${v.source}`}>
-                                                                {v.source || 'db'}
-                                                            </span>
-                                                            <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${v.is_active ? 'bg-green-500/10 text-green-400 border border-green-500/20' : 'bg-slate-700 text-slate-400'}`}>
-                                                                {v.is_active ? 'Active' : 'Inactive'}
-                                                            </span>
+                                                        <div className="space-y-2 text-sm border-t border-slate-700/50 pt-3">
+                                                            <div className="flex justify-between">
+                                                                <span className="text-slate-400">Voting Power</span>
+                                                                <span className="font-mono text-white">
+                                                                    {v.voting_power != null ? `${v.voting_power}%` : '—'}
+                                                                </span>
+                                                            </div>
+                                                            <div className="flex justify-between">
+                                                                <span className="text-slate-400">Stake</span>
+                                                                <span className="font-mono text-white">
+                                                                    {v.stake_amount != null ? `${Number(v.stake_amount).toLocaleString()} QIE` : '—'}
+                                                                </span>
+                                                            </div>
+                                                            <div className="flex justify-between">
+                                                                <span className="text-slate-400">Uptime</span>
+                                                                <span className={v.uptime != null && Number(v.uptime) >= 95 ? 'text-green-400 font-mono' : 'text-yellow-400 font-mono'}>
+                                                                    {v.uptime != null ? `${v.uptime}%` : '—'}
+                                                                </span>
+                                                            </div>
+                                                            <div className="flex justify-between text-xs text-slate-500 pt-1">
+                                                                <span>Transactions: {v.transactions ?? 0}</span>
+                                                                <span>Alerts: {v.alerts ?? 0}</span>
+                                                            </div>
                                                         </div>
                                                     </div>
-                                                    <div className="space-y-2 text-sm border-t border-slate-700/50 pt-3">
-                                                        <div className="flex justify-between">
-                                                            <span className="text-slate-400">Voting Power</span>
-                                                            <span className="font-mono text-white">
-                                                                {v.voting_power != null ? `${v.voting_power}%` : '—'}
-                                                            </span>
-                                                        </div>
-                                                        <div className="flex justify-between">
-                                                            <span className="text-slate-400">Stake</span>
-                                                            <span className="font-mono text-white">
-                                                                {v.stake_amount != null ? `${Number(v.stake_amount).toLocaleString()} QIE` : '—'}
-                                                            </span>
-                                                        </div>
-                                                        <div className="flex justify-between">
-                                                            <span className="text-slate-400">Uptime</span>
-                                                            <span className={v.uptime != null && v.uptime >= 95 ? 'text-green-400 font-mono' : 'text-yellow-400 font-mono'}>
-                                                                {v.uptime != null ? `${v.uptime}%` : '—'}
-                                                            </span>
-                                                        </div>
-                                                        <div className="flex justify-between text-xs text-slate-500 pt-1">
-                                                            <span>Transactions: {v.transactions ?? '—'}</span>
-                                                            <span>Alerts: {v.alerts ?? '—'}</span>
-                                                        </div>
-                                                    </div>
+                                                ))}
+                                            </div>
+                                            {totalValidatorPages > 1 && (
+                                                <div className="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
+                                                    <PaginationControls
+                                                        currentPage={validatorPage}
+                                                        totalPages={totalValidatorPages}
+                                                        onPageChange={setValidatorPage}
+                                                    />
                                                 </div>
-                                            ))}
-                                        </div>
+                                            )}
+                                        </>
                                     )}
                                 </motion.div>
                             )}
@@ -1274,7 +1467,6 @@ export default function Dashboard() {
                                         ))}
                                     </div>
 
-                                    {/* News Modal */}
                                     <AnimatePresence>
                                         {selectedNews && (
                                             <motion.div
@@ -1314,7 +1506,7 @@ export default function Dashboard() {
                                 </motion.div>
                             )}
 
-                            {/* ALERTS TAB & AUDIT SEARCH UI */}
+                            {/* ALERTS TAB & MULTI-SELECT AUDIT UI */}
                             {activeSection === 'alerts' && (
                                 <motion.div
                                     key="alerts"
@@ -1322,18 +1514,37 @@ export default function Dashboard() {
                                     animate={{ opacity: 1 }}
                                     className="space-y-6"
                                 >
-                                    {/* Alert Filter Toolbar backed by /api/v1/alerts */}
                                     <div className="bg-slate-800 p-5 rounded-2xl border border-slate-700 space-y-4 shadow-xl">
                                         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-slate-700/60 pb-3">
                                             <div className="flex items-center gap-2">
                                                 <Filter className="w-4 h-4 text-blue-400" />
                                                 <h3 className="font-semibold text-white text-base">Alert History Audit Filters</h3>
                                             </div>
-                                            <span className="text-xs text-slate-400 font-mono">GET /api/v1/alerts</span>
+                                            <div className="flex items-center gap-3">
+                                                {unresolvedDisplayedIds.length > 0 && (
+                                                    <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer select-none">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={unresolvedDisplayedIds.length > 0 && unresolvedDisplayedIds.every(id => selectedAlertIds.includes(id))}
+                                                            onChange={toggleSelectAllUnresolved}
+                                                            className="w-4 h-4 rounded border-slate-600 bg-slate-900 text-blue-600 focus:ring-blue-500"
+                                                        />
+                                                        Select All Unresolved ({unresolvedDisplayedIds.length})
+                                                    </label>
+                                                )}
+                                                {selectedAlertIds.length > 0 && (
+                                                    <button
+                                                        onClick={handleBulkResolveAlerts}
+                                                        className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 shadow"
+                                                    >
+                                                        <CheckSquare className="w-3.5 h-3.5" />
+                                                        Resolve Selected ({selectedAlertIds.length})
+                                                    </button>
+                                                )}
+                                            </div>
                                         </div>
 
                                         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
-                                            {/* Severity Filter */}
                                             <div>
                                                 <label className="text-xs text-slate-400 block mb-1">Severity</label>
                                                 <select
@@ -1349,7 +1560,6 @@ export default function Dashboard() {
                                                 </select>
                                             </div>
 
-                                            {/* Resolution Filter */}
                                             <div>
                                                 <label className="text-xs text-slate-400 block mb-1">Status</label>
                                                 <select
@@ -1363,7 +1573,6 @@ export default function Dashboard() {
                                                 </select>
                                             </div>
 
-                                            {/* From Date Filter */}
                                             <div>
                                                 <label className="text-xs text-slate-400 block mb-1">From Date</label>
                                                 <input
@@ -1374,7 +1583,6 @@ export default function Dashboard() {
                                                 />
                                             </div>
 
-                                            {/* To Date Filter */}
                                             <div>
                                                 <label className="text-xs text-slate-400 block mb-1">To Date</label>
                                                 <input
@@ -1385,7 +1593,6 @@ export default function Dashboard() {
                                                 />
                                             </div>
 
-                                            {/* Tx Hash Filter */}
                                             <div>
                                                 <label className="text-xs text-slate-400 block mb-1">Transaction Hash</label>
                                                 <div className="relative">
@@ -1400,7 +1607,6 @@ export default function Dashboard() {
                                                 </div>
                                             </div>
 
-                                            {/* Filter Actions */}
                                             <div className="flex items-end gap-2">
                                                 <button
                                                     onClick={fetchFilteredAlerts}
@@ -1415,6 +1621,7 @@ export default function Dashboard() {
                                                         setAlertFilterTxHash('');
                                                         setAlertFilterFrom('');
                                                         setAlertFilterTo('');
+                                                        setSelectedAlertIds([]);
                                                     }}
                                                     className="bg-slate-700 hover:bg-slate-600 text-slate-300 px-3 py-2 rounded-lg text-sm transition-colors"
                                                     title="Reset filters"
@@ -1425,7 +1632,6 @@ export default function Dashboard() {
                                         </div>
                                     </div>
 
-                                    {/* Alert Items List */}
                                     {!isAuthed ? (
                                         <div className="bg-slate-800 p-8 rounded-2xl border border-slate-700 text-center flex flex-col items-center">
                                             <Lock className="w-8 h-8 mb-2 text-slate-500" />
@@ -1454,6 +1660,7 @@ export default function Dashboard() {
                                                 const Icon = style.icon;
                                                 const isResolved = !!alert.is_resolved;
                                                 const alertId = alert.id ?? alert.alert_id;
+                                                const isSelected = alertId ? selectedAlertIds.includes(alertId) : false;
 
                                                 return (
                                                     <div
@@ -1461,7 +1668,15 @@ export default function Dashboard() {
                                                         className={`${style.bg} ${style.border} border p-5 rounded-2xl flex flex-col md:flex-row md:items-center justify-between gap-4 transition-all`}
                                                     >
                                                         <div className="flex items-start gap-4">
-                                                            <div className={`p-2 rounded-xl bg-slate-900/50 shrink-0 mt-0.5`}>
+                                                            {alertId && !isResolved && (
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={isSelected}
+                                                                    onChange={() => toggleSelectAlert(alertId)}
+                                                                    className="mt-2.5 w-4 h-4 rounded border-slate-600 bg-slate-900 text-blue-600 focus:ring-blue-500 cursor-pointer shrink-0"
+                                                                />
+                                                            )}
+                                                            <div className="p-2 rounded-xl bg-slate-900/50 shrink-0 mt-0.5">
                                                                 <Icon className={`${style.text} w-5 h-5`} />
                                                             </div>
                                                             <div>
@@ -1480,7 +1695,6 @@ export default function Dashboard() {
                                                                     )}
                                                                 </div>
 
-                                                                {/* Reasoning Display */}
                                                                 <p className="text-slate-200 text-sm mt-1">{alert.message || alert.reason || 'Flagged by ML model'}</p>
 
                                                                 {alert.reason && alert.reason !== alert.message && (
@@ -1505,7 +1719,6 @@ export default function Dashboard() {
                                                             </div>
                                                         </div>
 
-                                                        {/* Resolution Button */}
                                                         {alertId && !isResolved && (
                                                             <div className="md:self-center shrink-0">
                                                                 <button
@@ -1524,7 +1737,7 @@ export default function Dashboard() {
                                 </motion.div>
                             )}
 
-                            {/* ANALYTICS TAB */}
+                            {/* ANALYTICS TAB (Paginated Cross-Chain Bridge Routes — 5 per page) */}
                             {activeSection === 'analytics' && (
                                 <motion.div
                                     key="analytics"
@@ -1532,7 +1745,6 @@ export default function Dashboard() {
                                     animate={{ opacity: 1 }}
                                     className="space-y-6"
                                 >
-                                    {/* Analytics Summary Cards (Honest Real Metrics) */}
                                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                                         <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700">
                                             <div className="text-slate-400 text-sm mb-1">Average Anomaly Score</div>
@@ -1545,21 +1757,20 @@ export default function Dashboard() {
                                         <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700">
                                             <div className="text-slate-400 text-sm mb-1">ML Detection Latency</div>
                                             <div className="text-3xl font-bold text-emerald-400 font-mono">
-                                                {pipelineLatency} ms
+                                                {pipelineLatency == null ? 'Unavailable' : `${pipelineLatency} ms`}
                                             </div>
-                                            <div className="text-xs text-slate-500 mt-2">Sub-100ms real-time inference</div>
+                                            <div className="text-xs text-slate-500 mt-2">Measured inference time; target below 100ms</div>
                                         </div>
 
                                         <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700">
-                                            <div className="text-slate-400 text-sm mb-1">Peak Network TPS</div>
+                                            <div className="text-slate-400 text-sm mb-1">Peak Observed TPS Today</div>
                                             <div className="text-3xl font-bold text-blue-400 font-mono">
-                                                {peakTps} TPS
+                                                {peakTps == null ? 'Unavailable' : `${peakTps} TPS`}
                                             </div>
-                                            <div className="text-xs text-slate-500 mt-2">Max processed block throughput</div>
+                                            <div className="text-xs text-slate-500 mt-2">Transactions per second in the stored feed</div>
                                         </div>
                                     </div>
 
-                                    {/* Main Network Traffic Chart (Derivation from daily-stats, never random) */}
                                     <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-xl">
                                         <div className="flex justify-between items-center mb-6">
                                             <div>
@@ -1624,11 +1835,16 @@ export default function Dashboard() {
                                         </div>
                                     </div>
 
-                                    {/* Cross-Chain Bridge Breakdown (Real Database Queries) */}
-                                    <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700">
-                                        <div className="flex justify-between items-center mb-4">
-                                            <h3 className="text-lg font-bold text-white">Cross-Chain Bridge Routes</h3>
-                                            <span className="text-xs text-slate-400 font-mono">Bridge & Transaction Telemetry</span>
+                                    {/* Cross-Chain Bridge Routes (Paginated 5 per page) */}
+                                    <div className="bg-slate-800 rounded-2xl border border-slate-700 overflow-hidden">
+                                        <div className="p-6 border-b border-slate-700/60 flex justify-between items-center">
+                                            <div>
+                                                <h3 className="text-lg font-bold text-white">Cross-Chain Bridge Routes</h3>
+                                                <p className="text-xs text-slate-400 mt-0.5">
+                                                    Showing {displayedBridgeRoutes.length} of {bridgeRoutes.length} active routes (Page {bridgePage} of {totalBridgePages})
+                                                </p>
+                                            </div>
+                                            <span className="text-xs text-slate-400 font-mono">Bridge & Contract Telemetry</span>
                                         </div>
                                         {!isAuthed ? (
                                             <div className="p-6 text-center text-slate-400 text-sm">
@@ -1639,30 +1855,37 @@ export default function Dashboard() {
                                                 No bridge routes recorded yet. Routes will populate as cross-chain transactions are ingested.
                                             </div>
                                         ) : (
-                                            <div className="space-y-4">
-                                                {bridgeRoutes.map((route, i) => (
-                                                    <div key={route.chain || i} className="flex items-center justify-between border-b border-slate-700/50 pb-3">
-                                                        <div className="flex items-center gap-3">
-                                                            <div className={`w-3 h-3 rounded-full ${['bg-blue-500', 'bg-yellow-500', 'bg-purple-500', 'bg-emerald-500', 'bg-red-500'][i % 5]}`}></div>
-                                                            <div>
-                                                                <span className="text-slate-200 font-medium">{route.chain}</span>
-                                                                <div className="text-xs text-slate-500">
-                                                                    {route.transactions ?? 0} txs • {Number(route.volume || 0).toLocaleString()} QIE volume
-                                                                    {route.flagged > 0 ? ` • ${route.flagged} flagged` : ''}
+                                            <>
+                                                <div className="p-6 space-y-4">
+                                                    {displayedBridgeRoutes.map((route, i) => (
+                                                        <div key={route.chain || i} className="flex items-center justify-between border-b border-slate-700/50 pb-3 last:border-b-0 last:pb-0">
+                                                            <div className="flex items-center gap-3">
+                                                                <div className={`w-3 h-3 rounded-full ${['bg-blue-500', 'bg-yellow-500', 'bg-purple-500', 'bg-emerald-500', 'bg-red-500'][i % 5]}`}></div>
+                                                                <div>
+                                                                    <span className="text-slate-200 font-medium">{route.chain}</span>
+                                                                    <div className="text-xs text-slate-500">
+                                                                        {route.transactions ?? 0} txs • {Number(route.volume || 0).toLocaleString()} QIE volume{(route.asset_volumes || []).filter(asset => asset.address || asset.symbol !== 'QIE').map(asset => ` • ${Number(asset.volume).toLocaleString()} ${asset.symbol || 'unknown asset'}`).join('')}
+                                                                        {route.flagged > 0 ? ` • ${route.flagged} flagged` : ''}
+                                                                    </div>
                                                                 </div>
                                                             </div>
-                                                        </div>
-                                                        <div className="text-right">
-                                                            <span className={`px-2 py-1 rounded border text-xs font-mono uppercase ${route.status === 'active'
+                                                            <div className="text-right">
+                                                                <span className={`px-2 py-1 rounded border text-xs font-mono uppercase ${route.status === 'active'
                                                                     ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
                                                                     : 'bg-slate-900 border-slate-700 text-slate-400'
-                                                                }`}>
-                                                                {route.status === 'active' ? 'Route Active' : route.status}
-                                                            </span>
+                                                                    }`}>
+                                                                    {route.status === 'active' ? 'Route Active' : route.status}
+                                                                </span>
+                                                            </div>
                                                         </div>
-                                                    </div>
-                                                ))}
-                                            </div>
+                                                    ))}
+                                                </div>
+                                                <PaginationControls
+                                                    currentPage={bridgePage}
+                                                    totalPages={totalBridgePages}
+                                                    onPageChange={setBridgePage}
+                                                />
+                                            </>
                                         )}
                                     </div>
                                 </motion.div>
@@ -1715,6 +1938,55 @@ export default function Dashboard() {
                     </div>
                 </div>
             </main>
+        </div>
+    );
+}
+
+function PaginationControls({ currentPage, totalPages, onPageChange }) {
+    if (totalPages <= 1) return null;
+
+    const pages = [];
+    const startPage = Math.max(1, currentPage - 2);
+    const endPage = Math.min(totalPages, startPage + 4);
+    for (let p = startPage; p <= endPage; p++) {
+        pages.push(p);
+    }
+
+    return (
+        <div className="px-6 py-4 bg-slate-900/40 border-t border-slate-700 flex items-center justify-between">
+            <span className="text-xs text-slate-400">
+                Page <span className="font-semibold text-white">{currentPage}</span> of <span className="font-semibold text-white">{totalPages}</span>
+            </span>
+            <div className="flex items-center gap-1.5">
+                <button
+                    onClick={() => onPageChange(Math.max(1, currentPage - 1))}
+                    disabled={currentPage <= 1}
+                    className="p-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-300 hover:bg-slate-700 disabled:opacity-40 disabled:pointer-events-none transition-colors"
+                    title="Previous Page"
+                >
+                    <ChevronLeft className="w-4 h-4" />
+                </button>
+                {pages.map(p => (
+                    <button
+                        key={p}
+                        onClick={() => onPageChange(p)}
+                        className={`px-3 py-1 rounded-lg text-xs font-semibold transition-colors ${p === currentPage
+                            ? 'bg-blue-600 text-white shadow'
+                            : 'bg-slate-800 border border-slate-700 text-slate-300 hover:bg-slate-700'
+                            }`}
+                    >
+                        {p}
+                    </button>
+                ))}
+                <button
+                    onClick={() => onPageChange(Math.min(totalPages, currentPage + 1))}
+                    disabled={currentPage >= totalPages}
+                    className="p-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-300 hover:bg-slate-700 disabled:opacity-40 disabled:pointer-events-none transition-colors"
+                    title="Next Page"
+                >
+                    <ChevronRight className="w-4 h-4" />
+                </button>
+            </div>
         </div>
     );
 }

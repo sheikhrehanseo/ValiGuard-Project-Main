@@ -40,6 +40,8 @@ def score_and_persist_transaction(
     timestamp: datetime,
     status: TransactionStatus = TransactionStatus.PENDING,
     bridge_id: Optional[int] = None,
+    asset_symbol: Optional[str] = "QIE",
+    asset_address: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Score and persist one transaction inside the caller's DB session.
 
@@ -72,6 +74,8 @@ def score_and_persist_transaction(
         receiver=receiver,
         timestamp=timestamp,
         tx_hash=tx_hash,
+        asset_symbol=asset_symbol,
+        asset_address=asset_address,
     )
     score_result = anomaly_model.score(scoring_transaction)
     model_unavailable = bool(
@@ -80,6 +84,18 @@ def score_and_persist_transaction(
     )
 
     transaction = session.query(Transaction).filter_by(tx_hash=tx_hash).first()
+
+    if transaction is not None:
+        for name, new_value in {
+            "value": value, "sender": sender, "receiver": receiver,
+            "source_chain": source_chain, "destination_chain": destination_chain,
+            "bridge_id": bridge_id, "asset_symbol": asset_symbol,
+            "asset_address": asset_address,
+        }.items():
+            if new_value is not None:
+                setattr(transaction, name, new_value)
+        if status != TransactionStatus.PENDING:
+            transaction.timestamp = timestamp
 
     if model_unavailable:
         # Check if this is a re-score of a transaction with an existing valid score
@@ -129,6 +145,8 @@ def score_and_persist_transaction(
                 source_chain=source_chain,
                 destination_chain=destination_chain,
                 value=value,
+                asset_symbol=asset_symbol,
+                asset_address=asset_address,
                 sender=sender,
                 receiver=receiver,
                 timestamp=timestamp,
@@ -180,6 +198,8 @@ def score_and_persist_transaction(
             source_chain=source_chain,
             destination_chain=destination_chain,
             value=value,
+            asset_symbol=asset_symbol,
+            asset_address=asset_address,
             sender=sender,
             receiver=receiver,
             timestamp=timestamp,

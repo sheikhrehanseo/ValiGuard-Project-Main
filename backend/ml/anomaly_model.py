@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import time
+from threading import RLock
 from datetime import datetime
 from typing import Dict, Optional, Any
 import numpy as np
@@ -63,6 +64,8 @@ class AnomalyModel:
         self.model_metadata: Dict[str, Any] = {}
         
         self._load_model()
+        self._score_lock = RLock()
+        self._asset_extractors = {"native:QIE": self.feature_extractor}
     
     def _load_model(self) -> bool:
         """
@@ -139,6 +142,20 @@ class AnomalyModel:
             self.feature_extractor = None
     
     def score(self, transaction) -> Dict[str, Any]:
+        # Each asset has its own amount/frequency baseline. Serialize access to
+        # rolling histories shared by Flask requests and the ingestion worker.
+        address = getattr(transaction, "asset_address", None)
+        symbol = getattr(transaction, "asset_symbol", "QIE")
+        key = str(address).lower() if address else f"native:{symbol}"
+        with self._score_lock:
+            if key not in self._asset_extractors and FEATURE_EXTRACTION_AVAILABLE:
+                self._asset_extractors[key] = FeatureExtractor(
+                    normalization_percentile=self.model_metadata.get("normalization_percentile", 95.0)
+                )
+            self.feature_extractor = self._asset_extractors.get(key)
+            return self._score(transaction)
+
+    def _score(self, transaction) -> Dict[str, Any]:
         """
         Score a transaction for anomaly risk.
         
@@ -186,24 +203,34 @@ class AnomalyModel:
             # Lower scores = more anomalous
             risk_score = self._convert_to_risk_score(decision_score)
 
-            # Keep the explicit value outlier signal monotonic with the
-            # Isolation Forest output. A capped value feature represents a
-            # transaction beyond the learned high-value baseline and must not
-            # score below an ordinary transaction because of temporal noise.
+            # Keep explicit value outlier and sender burst signals monotonic
+            # with the Isolation Forest output.
             historical_values = list(
                 getattr(self.feature_extractor, "_value_history", ())
             )[:-1]
             historical_max = max(historical_values, default=0.0)
+            tx_val = float(transaction.value) if transaction.value is not None else 0.0
             is_value_outlier = (
                 features[0] >= 2.0
                 or (
                     historical_max > 0
-                    and transaction.value is not None
-                    and float(transaction.value) >= historical_max * 10
+                    and tx_val >= historical_max * 10
                 )
             )
+            freq_dev = float(features[1])
             if is_value_outlier:
                 risk_score = max(risk_score, 80)
+            elif tx_val > 0 and (freq_dev >= 2.0 or features[0] >= 1.5):
+                risk_score = max(risk_score, 65)
+            elif tx_val > 0 and (freq_dev >= 0.8 or features[0] >= 1.15):
+                risk_score = max(risk_score, 45)
+            elif tx_val == 0 and freq_dev >= 4.0:
+                risk_score = max(risk_score, 65)
+            elif tx_val == 0 and freq_dev >= 2.2:
+                risk_score = max(risk_score, 45)
+            elif tx_val == 0 and risk_score >= 40 and freq_dev < 1.5:
+                # Prevent routine 0-QIE oracle heartbeats during off-hours from false-alarming
+                risk_score = 25
             
             # Determine confidence based on distance from threshold
             confidence = self._calculate_confidence(decision_score)

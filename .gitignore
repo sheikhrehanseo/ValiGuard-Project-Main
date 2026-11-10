@@ -26,7 +26,9 @@ Thumbs.db
 # ValiGuard Specific
 data/valiguard.db
 *.log
+*.db
 valiguard.db
+backups/
 
 # QIE Validator
 validator_wallet_info.txt

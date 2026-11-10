@@ -20,9 +20,6 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.execute("UPDATE transactions SET sender = NULL WHERE sender = ''")
-    op.execute("UPDATE transactions SET receiver = NULL WHERE receiver = ''")
-
     with op.batch_alter_table("transactions") as batch_op:
         batch_op.alter_column(
             "sender", existing_type=sa.String(length=255), nullable=True
@@ -42,6 +39,9 @@ def upgrade() -> None:
         batch_op.alter_column(
             "bridge_id", existing_type=sa.Integer(), nullable=True
         )
+
+    op.execute("UPDATE transactions SET sender = NULL WHERE sender = ''")
+    op.execute("UPDATE transactions SET receiver = NULL WHERE receiver = ''")
 
 
 def downgrade() -> None:

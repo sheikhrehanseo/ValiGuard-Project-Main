@@ -272,13 +272,27 @@ def _try_decode_raw_entry(raw_entry: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _classify_evm_input_route(input_hex: str, value: Optional[float]) -> str:
+    """Classify an EVM transaction by its 4-byte function selector and value."""
+    selector = (input_hex or "0x")[:10].lower()
+    if selector in ("0xa9059cbb", "0x23b872dd", "0x095ea7b3"):
+        return "QIE Token Bridge"
+    if selector in ("0x38ed1739", "0x7ff36ab5", "0x18cbafe5", "0xe8e33700"):
+        return "QIEDEX Liquidity Pool"
+    if selector and selector != "0x" and len(selector) >= 10:
+        return "QIE Smart Contract"
+    if (value or 0.0) > 0:
+        return "QIE Native Bridge"
+    return "QIE Smart Contract"
+
+
 def normalize_transaction(
     raw_tx: Dict[str, Any],
     bridge_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Normalize a raw QIE Tendermint or EVM RPC transaction payload into the
-    Transaction schema shape.
+    Transaction schema shape (with honest zero values for 0-QIE contract calls).
     """
     tx = raw_tx if isinstance(raw_tx, dict) else {}
     raw_entry = tx.get("_raw_entry")
@@ -315,20 +329,9 @@ def normalize_transaction(
         )
         if (sender or receiver) and source_chain is None and ("blockNumber" in tx or "chainId" in tx or "gasPrice" in tx):
             input_hex = str(tx.get("input") or "0x")
-            if input_hex and input_hex != "0x" and len(input_hex) >= 10:
-                source_chain = f"QIE Contract ({input_hex[:10]})"
-            else:
-                source_chain = "QIE Native Settlement"
+            source_chain = _classify_evm_input_route(input_hex, value)
         if (sender or receiver) and destination_chain is None and ("blockNumber" in tx or "chainId" in tx or "gasPrice" in tx):
             destination_chain = "QIE"
-
-        # If EVM transaction has 0 native value (e.g. contract call), estimate metric from gas * gasPrice
-        if value == 0.0 and ("gasPrice" in tx or "gas" in tx):
-            gp = _coerce_float(tx.get("gasPrice"), default=0.0) or 0.0
-            gas = _coerce_float(tx.get("gas"), default=21000.0) or 21000.0
-            if gp > 0:
-                fee_qie = gp * gas if gp < 1.0 else (gp * gas) / 1e18
-                value = round(max(fee_qie * 1000.0, 0.0001), 6)
 
     raw_ts = (
         tx.get("timestamp")
@@ -337,12 +340,22 @@ def normalize_transaction(
     )
     timestamp = _iso_to_datetime(raw_ts) or datetime.utcnow()
 
-    if tx.get("_source") == "block" or tx.get("height") is not None or tx.get("blockNumber") is not None:
+    if tx.get("status") in ("pending", "confirmed", "failed"):
+        status = tx["status"]
+    elif tx.get("_source") == "block" or tx.get("height") is not None or tx.get("blockNumber") is not None:
         status = "confirmed"
     elif tx.get("_source") == "mempool":
         status = "pending"
     else:
-        status = tx.get("status") or "pending"
+        status = "pending"
+
+    bridge_chain_name = tx.get("bridge_chain_name") or source_chain
+    bridge_address = tx.get("bridge_address")
+    if not bridge_address and bridge_chain_name:
+        if receiver and str(bridge_chain_name) != "QIE Native Transfer":
+            bridge_address = str(receiver).lower()
+        else:
+            bridge_address = "bridge:qie:native-transfer"
 
     return {
         "tx_hash": tx_hash,
@@ -350,10 +363,12 @@ def normalize_transaction(
         "source_chain": source_chain,
         "destination_chain": destination_chain,
         "value": value,
+        "asset_symbol": tx.get("asset_symbol", "QIE" if value is not None and sender else None),
+        "asset_address": tx.get("asset_address"),
         "sender": sender,
         "receiver": receiver,
-        "bridge_address": tx.get("bridge_address"),
-        "bridge_chain_name": tx.get("bridge_chain_name") or source_chain,
+        "bridge_address": bridge_address,
+        "bridge_chain_name": bridge_chain_name,
         "timestamp": timestamp,
         "status": status,
         "anomaly_score": None,
@@ -401,8 +416,8 @@ class IngestionWorker:
         self.bridge_id = bridge_id
         self.on_new_transaction = on_new_transaction
 
-        self._seen_hashes: set[str] = set()
         self._last_evm_block_height: Optional[int] = None
+        self._last_tm_block_height: Optional[int] = None
         self._last_explorer_sync: float = 0.0
         self._last_validator_sync: float = 0.0
 
@@ -438,16 +453,18 @@ class IngestionWorker:
                 if new_txs:
                     logger.info("Ingested %d new transaction(s)", len(new_txs))
                 backoff = self.poll_interval
-            except Exception as exc:  # noqa: BLE001 — loop must not die
+            except Exception as exc:  # noqa: BLE001
                 logger.error("Ingestion poll failed: %s — backing off %.1fs", exc, backoff)
                 backoff = min(backoff * 2.0, self.max_backoff)
 
             self._stop_event.wait(backoff)
 
     def _is_tendermint_endpoint(self) -> bool:
-        """Return True if the node_manager is configured for a Tendermint RPC port."""
+        """Recognize local nodes and HTTPS Tendermint gateways alike."""
         if "_fast_rpc_call" in self.__dict__:
             return True
+        if hasattr(self.node_manager, "uses_tendermint_rpc"):
+            return self.node_manager.uses_tendermint_rpc()
         rpc_url = getattr(self.node_manager, "rpc_url", "") or ""
         return ":26657" in rpc_url or "localhost" in rpc_url or "127.0.0.1" in rpc_url
 
@@ -466,14 +483,13 @@ class IngestionWorker:
         use_tendermint = self._is_tendermint_endpoint()
         use_public_qie = self._is_public_qie_gateway()
 
-        # When connected to live QIE gateway, sync real network validators & recent explorer txs
         now = time.time()
         if use_public_qie:
             if now - self._last_validator_sync >= 30.0:
                 self._sync_live_qie_validators()
                 self._last_validator_sync = now
 
-            if now - self._last_explorer_sync >= 12.0:
+            if now - self._last_explorer_sync >= 10.0:
                 for raw in self._fetch_explorer_recent_txs():
                     normalized = self._handle_raw(raw)
                     if normalized is not None:
@@ -495,7 +511,7 @@ class IngestionWorker:
                     new_normalized.append(normalized)
 
         # 3) Standard EVM JSON-RPC Mempool (pending txs).
-        if self.mempool_enabled and self.evm_rpc_enabled and use_tendermint:
+        if self.mempool_enabled and self.evm_rpc_enabled:
             for raw in self._fetch_evm_mempool_txs():
                 normalized = self._handle_raw(raw)
                 if normalized is not None:
@@ -511,7 +527,10 @@ class IngestionWorker:
         return new_normalized
 
     def _sync_live_qie_validators(self) -> None:
-        """Upsert real QIE Mainnet validators (online & offline) into the database."""
+        """
+        Upsert real QIE Mainnet validators (online & offline) and clean up
+        any legacy placeholder validator rows.
+        """
         if not hasattr(self.node_manager, "get_live_network_validators"):
             return
         try:
@@ -519,9 +538,10 @@ class IngestionWorker:
             if not live_validators:
                 return
             with self.db_manager.get_session() as session:
-                # Remove dummy seeded validators (qie1validator0aaaa...) if present
                 session.query(Validator).filter(
-                    Validator.address.like("qie1validator%")
+                    (Validator.address.like("qie1validator%"))
+                    | (Validator.address.like("qie1valoper%"))
+                    | (Validator.name.like("QIE Validator #%"))
                 ).delete(synchronize_session=False)
 
                 for v_data in live_validators:
@@ -532,24 +552,23 @@ class IngestionWorker:
                             address=addr,
                             name=v_data["name"],
                             stake_amount=float(v_data["stake_amount"]),
-                            uptime_percentage=float(v_data["uptime_percentage"]),
+                            uptime_percentage=v_data.get("uptime_percentage"),
                             is_active=bool(v_data["is_active"]),
                         ))
                     else:
                         existing.name = v_data["name"]
                         existing.stake_amount = float(v_data["stake_amount"])
-                        existing.uptime_percentage = float(v_data["uptime_percentage"])
+                        existing.uptime_percentage = v_data.get("uptime_percentage")
                         existing.is_active = bool(v_data["is_active"])
         except Exception as exc:
             logger.debug(f"Live validator sync skipped: {exc}")
 
     def _fetch_explorer_recent_txs(self) -> Iterable[Dict[str, Any]]:
-        """Fetch recent confirmed transactions from QIE Explorer API v2."""
+        """Fetch recent confirmed & pending transactions from QIE Explorer API v2."""
         if not hasattr(self.node_manager, "get_explorer_recent_transactions"):
             return []
         try:
-            txs = self.node_manager.get_explorer_recent_transactions(limit=25)
-            # Process oldest-first so rolling baseline builds in chronological order
+            txs = self.node_manager.get_explorer_recent_transactions(limit=30)
             return list(reversed(txs))
         except Exception as exc:
             logger.debug(f"Explorer recent txs fetch failed: {exc}")
@@ -575,16 +594,23 @@ class IngestionWorker:
         tx_hash = normalized.get("tx_hash") or ""
         if not tx_hash:
             return None
-        is_confirmed = normalized.get("status") == "confirmed"
-        if tx_hash in self._seen_hashes and not is_confirmed:
-            return None
-        if is_confirmed:
-            with self.db_manager.get_session() as session:
-                existing = session.query(Transaction).filter_by(tx_hash=tx_hash).first()
-                if existing is not None and existing.status == TransactionStatus.CONFIRMED:
-                    self._seen_hashes.add(tx_hash)
+        with self.db_manager.get_session() as session:
+            existing = session.query(Transaction).filter_by(tx_hash=tx_hash).first()
+            if existing is not None:
+                if existing.status == TransactionStatus.FAILED and normalized["status"] == "confirmed":
+                    return None  # Inclusion-only feeds cannot undo an observed execution failure.
+                enriches_asset = (
+                    (normalized.get("asset_address") and not existing.asset_address)
+                    or (normalized.get("asset_symbol") and not existing.asset_symbol)
+                )
+                if existing.status.value == normalized["status"] and not enriches_asset:
                     return None
-        self._seen_hashes.add(tx_hash)
+                if existing.asset_address and not normalized.get("asset_address"):
+                    for key in ("value", "asset_symbol", "asset_address", "sender", "receiver", "source_chain", "destination_chain"):
+                        normalized[key] = getattr(existing, key)
+                if normalized["status"] == "pending":
+                    return None  # Never regress a settled transaction to pending.
+        normalized["is_update"] = existing is not None
 
         persisted = self._persist_transaction(normalized)
         if persisted is None:
@@ -594,6 +620,7 @@ class IngestionWorker:
         normalized["risk_score"] = scored["risk_score"]
         normalized["severity"] = scored["severity"]
         normalized["reason"] = scored.get("reason")
+        normalized["inference_latency_ms"] = scored.get("inference_latency_ms")
         normalized["is_flagged"] = is_alerting_severity(scored["severity"])
         normalized["raw_entry"] = normalized.get("sender") is None
         if persisted.get("transaction") is not None:
@@ -604,7 +631,7 @@ class IngestionWorker:
         if self.on_new_transaction is not None:
             try:
                 self.on_new_transaction(normalized)
-            except Exception as exc:  # noqa: BLE001 — don't let callback kill the loop
+            except Exception as exc:  # noqa: BLE001
                 logger.error("on_new_transaction callback raised: %s", exc)
 
         return normalized
@@ -622,7 +649,7 @@ class IngestionWorker:
                     else TransactionStatus.PENDING
                 )
 
-                # If transaction came from a live QIE contract/bridge route, ensure Bridge row exists
+                # Group strictly by canonical bridge route (max 6 routes)
                 bridge_id = normalized.get("bridge_id")
                 bridge_addr = normalized.get("bridge_address")
                 bridge_chain = normalized.get("bridge_chain_name")
@@ -655,12 +682,14 @@ class IngestionWorker:
                     timestamp=normalized.get("timestamp") or datetime.utcnow(),
                     status=status_enum,
                     bridge_id=bridge_id,
+                    asset_symbol=normalized.get("asset_symbol"),
+                    asset_address=normalized.get("asset_address"),
                 )
 
             return result
         except IntegrityError as exc:
-            logger.warning("Duplicate tx_hash skipped: %s (%s)", normalized.get("tx_hash"), exc.orig)
-            return None
+            logger.warning("Transaction write failed: %s", normalized.get("tx_hash"))
+            raise
 
     def _fast_rpc_call(self, method: str) -> Dict[str, Any]:
         """Make a one-shot Tendermint worker RPC call."""
@@ -691,21 +720,21 @@ class IngestionWorker:
         block = block.get("block", {}) or {}
         if not block:
             return []
-        data = block.get("data", {}) or {}
-        txs = data.get("txs") or []
-        header = block.get("header", {}) or {}
-        height = header.get("height")
-        block_time = header.get("time")
-
-        out: List[Dict[str, Any]] = []
-        for entry in txs:
-            out.append({
-                "_source": "block",
-                "_raw_entry": entry,
-                "height": height,
-                "timestamp": block_time,
-            })
-        return out
+        current_height = int((block.get("header") or {}).get("height") or 0)
+        if current_height <= 0:
+            return
+        start_height = self._last_tm_block_height + 1 if self._last_tm_block_height is not None else current_height
+        for height in range(start_height, min(current_height, start_height + 99) + 1):
+            candidate = block
+            if height != current_height:
+                candidate = (self.node_manager.rpc_call("block", params={"height": str(height)}, timeout=3) or {}).get("block")
+            if not candidate or int(candidate.get("header", {}).get("height") or 0) != height:
+                return
+            header = candidate.get("header") or {}
+            for entry in (candidate.get("data") or {}).get("txs") or []:
+                yield {"_source": "block", "_raw_entry": entry,
+                       "height": height, "timestamp": header.get("time")}
+            self._last_tm_block_height = height
 
     def _fetch_evm_mempool_txs(self) -> Iterable[Dict[str, Any]]:
         """Fetch pending transactions from the EVM mempool via QIENodeManager."""
@@ -719,7 +748,7 @@ class IngestionWorker:
         out: List[Dict[str, Any]] = []
         for tx in txs or []:
             if isinstance(tx, dict):
-                out.append({**tx, "_source": "mempool"})
+                out.append({**tx, "_source": "mempool", "status": "pending"})
         return out
 
     def _fetch_evm_latest_block_txs(self) -> Iterable[Dict[str, Any]]:
@@ -740,38 +769,28 @@ class IngestionWorker:
             return []
 
         current_height = int(latest_info.get("height") or 0)
-        blocks_to_process = [latest_info]
-
-        if (
-            self._last_evm_block_height is not None
-            and current_height > self._last_evm_block_height + 1
-            and hasattr(self.node_manager, "get_evm_block_by_number")
-        ):
-            start_h = max(self._last_evm_block_height + 1, current_height - 4)
-            for h in range(start_h, current_height):
-                try:
-                    blk = self.node_manager.get_evm_block_by_number(
-                        h, full_transactions=True, timeout=2
-                    )
-                    if isinstance(blk, dict) and blk.get("found"):
-                        blocks_to_process.insert(-1, blk)
-                except Exception:
-                    pass
-
-        if current_height > 0:
-            self._last_evm_block_height = current_height
-
-        out: List[Dict[str, Any]] = []
-        for block_info in blocks_to_process:
-            height = block_info.get("height")
-            block_time = block_info.get("timestamp")
-            txs = block_info.get("transactions") or []
-            for tx in txs:
+        start_height = (self._last_evm_block_height + 1
+                        if self._last_evm_block_height is not None else current_height)
+        # Bound each poll's work without dropping the rest of the backlog.
+        for height in range(start_height, min(current_height, start_height + 99) + 1):
+            try:
+                block = latest_info if height == current_height else self.node_manager.get_evm_block_by_number(
+                    height, full_transactions=True, timeout=3
+                )
+            except Exception:
+                return
+            if not isinstance(block, dict) or not block.get("found") or int(block.get("height") or 0) != height:
+                return  # Retry the missing block on the next poll.
+            for tx in block.get("transactions") or []:
                 if isinstance(tx, dict):
-                    out.append({
-                        **tx,
-                        "_source": "block",
-                        "height": height,
-                        "timestamp": tx.get("timestamp") or block_time,
-                    })
-        return out
+                    status = "confirmed"
+                    if hasattr(self.node_manager, "get_evm_transaction_receipt"):
+                        receipt = self.node_manager.get_evm_transaction_receipt(tx["hash"], timeout=3)
+                        if not isinstance(receipt, dict) or receipt.get("status") is None:
+                            return  # Retry this block until its execution results are available.
+                        if receipt["status"] in (0, "0x0", "0x00"):
+                            status = "failed"
+                    yield {**tx, "_source": "block", "status": status,
+                           "height": height, "timestamp": tx.get("timestamp") or block.get("timestamp")}
+            # The caller has persisted every yielded transaction before advancing.
+            self._last_evm_block_height = height

@@ -138,6 +138,8 @@ class Transaction(Base):
     source_chain = Column(String(50), nullable=True)
     destination_chain = Column(String(50), nullable=True)
     value = Column(Float, nullable=True)
+    asset_symbol = Column(String(50).evaluates_none(), nullable=True, default="QIE")
+    asset_address = Column(String(255), nullable=True)
     sender = Column(String(255), nullable=True)
     receiver = Column(String(255), nullable=True)
     timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
@@ -181,6 +183,8 @@ class Transaction(Base):
             "source_chain": self.source_chain,
             "destination_chain": self.destination_chain,
             "value": self.value,
+            "asset_symbol": self.asset_symbol,
+            "asset_address": self.asset_address,
             "sender": self.sender,
             "receiver": self.receiver,
             "raw_entry": self.sender is None,
@@ -287,7 +291,7 @@ class Validator(Base):
     address = Column(String(255), unique=True, nullable=False, index=True)
     name = Column(String(255), nullable=False)
     stake_amount = Column(Float, default=0.0, nullable=False)
-    uptime_percentage = Column(Float, default=100.0, nullable=False)
+    uptime_percentage = Column(Float, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
     joined_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

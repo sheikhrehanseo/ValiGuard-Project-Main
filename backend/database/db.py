@@ -6,12 +6,14 @@ Handles database setup, migrations, session management, and monitoring.
 import os
 import csv
 import shutil
+from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Generator, Dict, Any
 from contextlib import contextmanager
 import logging
 
 from sqlalchemy import create_engine, inspect, text, event
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import StaticPool
 from core.severity import is_alerting_severity, severity_from_score
@@ -46,6 +48,14 @@ class DatabaseConfig:
             echo_sql: Enable SQL logging
         """
         self.db_url = db_url or self._get_db_url()
+        url = make_url(self.db_url)
+        if url.drivername.startswith("sqlite") and url.database not in (None, "", ":memory:"):
+            database_path = Path(url.database)
+            if not database_path.is_absolute():
+                # Launcher migrations run from backend/, while the app runs from
+                # the repository root. Both must open the same SQLite database.
+                database_path = Path(__file__).resolve().parents[2] / database_path
+                self.db_url = url.set(database=database_path.resolve().as_posix()).render_as_string(hide_password=False)
         self.echo_sql = echo_sql
         self.is_sqlite = self.db_url.startswith("sqlite")
         self.is_postgres = self.db_url.startswith("postgresql")

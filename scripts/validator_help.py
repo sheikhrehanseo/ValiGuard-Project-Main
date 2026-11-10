@@ -1,8 +1,6 @@
 
 import subprocess
 import json
-import time
-import sys
 import re
 
 def run_wsl_command(cmd, input_text=None):
@@ -52,17 +50,6 @@ def get_validator_address():
     print(stdout)
     return "qie1ycctf3drjw6fzjpsdlxt6hh0muaasyhtl9ndld"
 
-def export_private_key():
-    print("\nExporting private key (inputting password)...")
-    cmd = "~/.qie/qied keys unsafe-export-eth-key validator --home ~/.qieMainnetNode"
-    # Send 'y' for confirmation + password
-    stdout, stderr, code = run_wsl_command(cmd, input_text="y\nShin@123\n")
-    
-    if code == 0 and stdout:
-        return stdout
-    else:
-        return f"Error returning key. Stdout: {stdout}\nStderr: {stderr}"
-
 def check_balance(address):
     print(f"\nChecking balance for {address}...")
     cmd = f"~/.qie/qied query bank balances {address} --chain-id qie_1990-1 --node tcp://localhost:26657 --output json"
@@ -92,14 +79,11 @@ def main():
     address = get_validator_address()
     print(f"Address: {address}")
     
-    # 2. Export Key
-    key = export_private_key()
-    print("\nPRIVATE KEY (Import to MetaMask):")
-    print("============================================================")
-    print(key)
-    print("============================================================")
-    
-    # 3. Check Balance
+    # Dashboard authentication uses MetaMask nonce signatures and JWTs.
+    # Validator key management remains with the node's local keyring.
+    print("\nConnect your existing MetaMask wallet in the dashboard to sign in.")
+
+    # 2. Check Balance
     balance = check_balance(address)
     print(f"\nBalance: {balance} QIE")
     

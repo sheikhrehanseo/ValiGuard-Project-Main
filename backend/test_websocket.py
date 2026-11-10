@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 
 import pytest
+from auth.jwt_auth import create_token
 from eth_account import Account
 from eth_account.messages import encode_defunct
 
@@ -15,6 +16,12 @@ from database.db import DatabaseConfig, DatabaseManager
 from database.models import Alert, AnomalyDetection, Transaction
 from ingestion.worker import IngestionWorker
 from test_alert_thresholds import FixedScoreModel
+
+
+def _client(app_module):
+    client = app_module.app.test_client()
+    client.environ_base["HTTP_AUTHORIZATION"] = "Bearer " + create_token("0x" + "1" * 40)
+    return client
 
 
 def _events(socket_client):
@@ -58,9 +65,9 @@ def stage3_context(tmp_path, monkeypatch):
 def test_scored_transaction_and_alert_emit_after_commit(stage3_context):
     app_module, database, model = stage3_context
     model.score_value = 45.0
-    flask_client = app_module.app.test_client()
+    flask_client = _client(app_module)
     socket_client = app_module.socketio.test_client(
-        app_module.app, flask_test_client=flask_client
+        app_module.app, auth={"token": create_token("0x" + "1" * 40)}, flask_test_client=flask_client
     )
     assert socket_client.is_connected()
     _events(socket_client)
@@ -107,9 +114,9 @@ def test_scored_transaction_and_alert_emit_after_commit(stage3_context):
 def test_low_score_emits_transaction_without_alert(stage3_context):
     app_module, _database, model = stage3_context
     model.score_value = 39.9
-    flask_client = app_module.app.test_client()
+    flask_client = _client(app_module)
     socket_client = app_module.socketio.test_client(
-        app_module.app, flask_test_client=flask_client
+        app_module.app, auth={"token": create_token("0x" + "1" * 40)}, flask_test_client=flask_client
     )
     _events(socket_client)
 
@@ -138,9 +145,9 @@ def test_mock_traffic_uses_worker_event_path(stage3_context, monkeypatch):
             on_new_transaction=app_module._emit_transaction_events,
         ),
     )
-    flask_client = app_module.app.test_client()
+    flask_client = _client(app_module)
     socket_client = app_module.socketio.test_client(
-        app_module.app, flask_test_client=flask_client
+        app_module.app, auth={"token": create_token("0x" + "1" * 40)}, flask_test_client=flask_client
     )
     _events(socket_client)
 
@@ -166,7 +173,7 @@ def test_mock_traffic_uses_worker_event_path(stage3_context, monkeypatch):
 
 def test_connected_client_receives_node_status(stage3_context):
     app_module, _database, _model = stage3_context
-    socket_client = app_module.socketio.test_client(app_module.app)
+    socket_client = app_module.socketio.test_client(app_module.app, auth={"token": create_token("0x" + "1" * 40)})
     assert socket_client.is_connected()
     _events(socket_client)
 
@@ -179,7 +186,7 @@ def test_connected_client_receives_node_status(stage3_context):
 def test_validate_cross_chain_uses_canonical_persistence(stage3_context):
     app_module, database, model = stage3_context
     model.score_value = 45.0
-    response = app_module.app.test_client().post(
+    response = _client(app_module).post(
         "/api/v1/bridge/validate-cross-chain",
         json={
             "transaction_hash": "stage3-validate",
@@ -205,9 +212,9 @@ def test_validate_cross_chain_uses_canonical_persistence(stage3_context):
 def test_resolve_alert_emits_after_commit(stage3_context):
     app_module, database, model = stage3_context
     model.score_value = 45.0
-    flask_client = app_module.app.test_client()
+    flask_client = _client(app_module)
     socket_client = app_module.socketio.test_client(
-        app_module.app, flask_test_client=flask_client
+        app_module.app, auth={"token": create_token("0x" + "1" * 40)}, flask_test_client=flask_client
     )
     flask_client.post(
         "/api/v1/bridge/anomaly-score",
@@ -233,7 +240,7 @@ def test_resolve_alert_emits_after_commit(stage3_context):
 def test_alert_history_filters_reason_and_invalid_values(stage3_context):
     app_module, _database, model = stage3_context
     model.score_value = 45.0
-    client = app_module.app.test_client()
+    client = _client(app_module)
     client.post(
         "/api/v1/bridge/anomaly-score",
         json={"transaction_hash": "stage3-history", "amount": 100.0},
@@ -266,9 +273,9 @@ def test_alert_history_filters_reason_and_invalid_values(stage3_context):
 def test_failed_commit_emits_no_events(stage3_context, monkeypatch):
     app_module, database, model = stage3_context
     model.score_value = 45.0
-    flask_client = app_module.app.test_client()
+    flask_client = _client(app_module)
     socket_client = app_module.socketio.test_client(
-        app_module.app, flask_test_client=flask_client
+        app_module.app, auth={"token": create_token("0x" + "1" * 40)}, flask_test_client=flask_client
     )
     _events(socket_client)
 

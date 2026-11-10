@@ -56,8 +56,9 @@ def ensure_test_db():
             "app bound to a non-test database "
             f"({url}); run test_analytics.py first in the suite"
         )
-    # Clean slate for the whole module.
-    _truncate_all_tables()
+    # Rebuild this dedicated test database so repeated runs use current metadata.
+    flask_app_module.db_manager.drop_db(confirm=True)
+    flask_app_module.db_manager.init_db()
 
 
 def _truncate_all_tables():
@@ -99,7 +100,7 @@ def _seed_known_data():
     """
     Insert rows with known values. Expected aggregates:
       validators: 3 total, 2 active, avg uptime 96.0, total stake 6000
-      v1 (top by stake): voting power 66.67, 2 txs, 1 alert
+      v1 (top by stake): voting power 80.0 (active bonded stake), 2 txs, 1 alert
     """
     with flask_app_module.db_manager.get_session() as session:
         bridge = Bridge(address="0xbridge-analytics", chain_name="QIE",
@@ -203,7 +204,7 @@ class TestValidatorStatsSeeded:
         assert len(data["top_validators"]) == 3
         top = data["top_validators"][0]
         assert top["address"] == "qie1valone"        # highest stake first
-        assert top["voting_power"] == 66.67          # 4000 / 6000 * 100
+        assert top["voting_power"] == 80.0          # 4000 / 5000 (active stake) * 100
         assert top["transactions"] == 2               # sender == validator addr
         assert top["alerts"] == 1                     # alert on tx2
         # Validators with no originating transactions report honest zeros.
@@ -242,7 +243,7 @@ class TestValidatorStatsSeeded:
         data = r.get_json()["data"]
 
         assert r.status_code == 200
-        assert data["top_validators"][0]["voting_power"] == 66.67
+        assert data["top_validators"][0]["voting_power"] == 80.0
         assert data["top_validators"][0]["source"] == "db"
 
     def test_node_telemetry_degrades_gracefully(self, client, token):

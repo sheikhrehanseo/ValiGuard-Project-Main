@@ -369,7 +369,7 @@ def test_rescore_commit_does_not_emit_duplicate_socket_events(tmp_path, monkeypa
 
     flask_client = app_module.app.test_client()
     socket_client = app_module.socketio.test_client(
-        app_module.app, flask_test_client=flask_client
+        app_module.app, auth={"token": __import__("auth.jwt_auth", fromlist=["create_token"]).create_token("0x" + "1" * 40)}, flask_test_client=flask_client
     )
     assert socket_client.is_connected()
     socket_client.get_received()  # drain initial events

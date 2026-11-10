@@ -12,17 +12,14 @@ import logging
 import subprocess
 import time
 import signal
+from urllib.parse import urlparse
 from typing import Dict, Optional, Any, List
 from pathlib import Path
 import requests
-import urllib3
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from dotenv import load_dotenv
-
-# Suppress InsecureRequestWarning when falling back on public RPC SSL chains
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Load environment variables
 load_dotenv()
@@ -36,6 +33,12 @@ logger = logging.getLogger(__name__)
 
 QIE_EXPLORER_API_BASE = os.getenv(
     "QIE_EXPLORER_API_URL", "https://mainnet.qie.digital/api/v2"
+)
+QIE_COSMOS_REST_URL = os.getenv(
+    "QIE_COSMOS_REST_URL", "https://rest.cosmos.directory/qie"
+)
+QIE_VALIDATOR_DIRECTORY_URL = os.getenv(
+    "QIE_VALIDATOR_DIRECTORY_URL", "https://validators.cosmos.directory/chains/qie"
 )
 
 
@@ -53,6 +56,9 @@ class QIENodeManager:
     ):
         self.rpc_url = rpc_url or os.getenv("QIE_RPC_URL", "http://localhost:26657")
         self.evm_rpc_url = evm_rpc_url or os.getenv("QIE_EVM_RPC_URL", "http://localhost:8545")
+        self.rpc_protocol = os.getenv("QIE_RPC_PROTOCOL", "auto").lower()
+        if self.rpc_protocol not in {"auto", "tendermint", "evm"}:
+            raise ValueError("QIE_RPC_PROTOCOL must be auto, tendermint, or evm")
         self.chain_id = chain_id or os.getenv("QIE_CHAIN_ID", "qie_1990-1")
         self.moniker = moniker or os.getenv("QIE_MONIKER", "valiguard-ai-validator")
         self.qie_home = qie_home or os.getenv("QIE_HOME", os.path.expanduser("~/.qieMainnetNode"))
@@ -63,7 +69,6 @@ class QIENodeManager:
         self.is_running = False
         self._validator_set_cache: Dict[str, Any] = {"result": None, "fetched_at": 0.0}
         
-        # Setup resilient HTTP session with retries
         self.session = self._create_session()
         
         logger.info(
@@ -72,9 +77,9 @@ class QIENodeManager:
         )
     
     def _create_session(self) -> requests.Session:
-        """Create a requests session with retry logic and SSL tolerance for public RPCs."""
+        """Create a requests session with retries and verified TLS."""
         session = requests.Session()
-        session.verify = False
+        session.verify = True
         retry_strategy = Retry(
             total=2,
             status_forcelist=[429, 500, 502, 503, 504],
@@ -86,12 +91,27 @@ class QIENodeManager:
         session.mount("https://", adapter)
         return session
 
+    def uses_tendermint_rpc(self) -> bool:
+        """Identify the configured RPC protocol, independently of its port.
+
+        QIE_RPC_URL is the Tendermint connection. Keep auto compatibility with
+        older configurations that put a numbered QIE EVM gateway in that slot.
+        HTTPS Tendermint proxies (including Cosmos Directory) use port 443.
+        """
+        if self.rpc_protocol != "auto":
+            return self.rpc_protocol == "tendermint"
+        hostname = urlparse(self.rpc_url).hostname or ""
+        legacy_evm_hosts = {
+            f"rpc{number}{network}.qie.digital"
+            for number in range(1, 7)
+            for network in ("mainnet", "testnet")
+        }
+        return hostname not in legacy_evm_hosts
+
     def is_public_qie_gateway(self) -> bool:
         """Return True when configured against a live QIE public gateway (*.qie.digital)."""
-        return (
-            "qie.digital" in (self.rpc_url or "")
-            or "qie.digital" in (self.evm_rpc_url or "")
-        )
+        hosts = [urlparse(url).hostname or "" for url in (self.rpc_url, self.evm_rpc_url)]
+        return any(host == "qie.digital" or host.endswith(".qie.digital") for host in hosts)
     
     def _rpc_call(self, method: str, params: Optional[Dict] = None, timeout: int = 10) -> Dict[str, Any]:
         """Make a JSON-RPC call to the Tendermint RPC endpoint."""
@@ -151,19 +171,9 @@ class QIENodeManager:
         }
         http_client = self.session if use_session else requests
         try:
-            try:
-                response = http_client.post(
-                    self.evm_rpc_url,
-                    json=payload,
-                    timeout=timeout,
-                )
-            except requests.exceptions.SSLError:
-                response = http_client.post(
-                    self.evm_rpc_url,
-                    json=payload,
-                    timeout=timeout,
-                    verify=False,
-                )
+            response = http_client.post(
+                self.evm_rpc_url, json=payload, timeout=timeout,
+            )
             response.raise_for_status()
             data = response.json()
             if isinstance(data, dict):
@@ -253,182 +263,318 @@ class QIENodeManager:
         )
 
     def get_explorer_recent_transactions(
-        self, limit: int = 25, timeout: int = 4
+        self, limit: int = 30, timeout: int = 4
     ) -> List[Dict[str, Any]]:
         """
-        Fetch recent real transactions from the QIE Mainnet Explorer REST API v2
-        (/api/v2/main-page/transactions and /api/v2/transactions).
+        Fetch real pending transactions, token bridge transfers (/token-transfers),
+        and native/contract transactions (/transactions) from the QIE Mainnet Explorer API v2.
         """
-        items: List[Dict[str, Any]] = []
-        for path in ("/main-page/transactions", "/transactions"):
+        tx_items: List[Dict[str, Any]] = []
+        token_transfer_items: List[Dict[str, Any]] = []
+
+        # 1. Fetch pending mempool + recent main-page/validated transactions
+        for path in (
+            "/transactions?filter=pending",
+            "/main-page/transactions",
+            "/transactions",
+        ):
             url = f"{self.explorer_api_url}{path}"
             try:
-                resp = requests.get(url, timeout=timeout, verify=False)
+                resp = requests.get(url, timeout=timeout)
                 if not resp.ok:
                     continue
                 payload = resp.json()
                 if isinstance(payload, list):
-                    items = payload
+                    tx_items.extend(payload)
                 elif isinstance(payload, dict) and isinstance(payload.get("items"), list):
-                    items = payload["items"]
-                if items:
-                    break
+                    tx_items.extend(payload["items"])
             except Exception as exc:
                 logger.debug(f"QIE explorer transactions fetch failed ({url}): {exc}")
 
+        # 2. Fetch real non-zero token & bridge transfers (/api/v2/token-transfers)
+        try:
+            tt_resp = requests.get(
+                f"{self.explorer_api_url}/token-transfers", timeout=timeout
+            )
+            if tt_resp.ok:
+                tt_payload = tt_resp.json()
+                if isinstance(tt_payload, list):
+                    token_transfer_items = tt_payload
+                elif isinstance(tt_payload, dict) and isinstance(tt_payload.get("items"), list):
+                    token_transfer_items = tt_payload["items"]
+        except Exception as exc:
+            logger.debug(f"QIE explorer token-transfers fetch failed: {exc}")
+
+        seen_hashes: set[str] = set()
         normalized_list: List[Dict[str, Any]] = []
-        for item in items[:limit]:
+
+        # Process token transfers first so non-zero bridged/QIE-20 transfers are always represented
+        for tt in token_transfer_items[: max(limit // 2, 10)]:
+            if not isinstance(tt, dict):
+                continue
+            tx_hash = tt.get("tx_hash") or tt.get("transaction_hash")
+            if not tx_hash or tx_hash in seen_hashes:
+                continue
+            seen_hashes.add(tx_hash)
+
+            from_obj = tt.get("from") if isinstance(tt.get("from"), dict) else {}
+            to_obj = tt.get("to") if isinstance(tt.get("to"), dict) else {}
+            token_obj = tt.get("token") if isinstance(tt.get("token"), dict) else {}
+            total_obj = tt.get("total") if isinstance(tt.get("total"), dict) else {}
+
+            sender = from_obj.get("hash") or "0x0000000000000000000000000000000000000000"
+            receiver = to_obj.get("hash") or "0x0000000000000000000000000000000000000000"
+
+            decimals = None
+            try:
+                raw_decimals = total_obj.get("decimals")
+                if raw_decimals is None:
+                    raw_decimals = token_obj.get("decimals")
+                decimals = int(raw_decimals) if raw_decimals is not None else None
+            except (ValueError, TypeError):
+                pass
+
+            value_amount = None
+            raw_val = total_obj.get("value")
+            if raw_val is not None and decimals is not None and 0 <= decimals <= 255:
+                try:
+                    value_amount = round(int(str(raw_val)) / (10 ** decimals), 6)
+                except (ValueError, TypeError):
+                    pass
+
+            token_symbol = (token_obj.get("symbol") or "").strip()
+            token_name = (token_obj.get("name") or "").strip()
+            token_addr = (token_obj.get("address") or token_obj.get("address_hash") or receiver).strip()
+
+            if token_symbol and token_name and token_symbol.lower() not in token_name.lower():
+                route_name = f"{token_name} ({token_symbol})"
+            elif token_name:
+                route_name = token_name
+            elif token_symbol:
+                route_name = f"{token_symbol} Token Bridge"
+            else:
+                route_name = f"Token Contract ({token_addr[:8]}...)"
+
+            normalized_list.append({
+                "hash": tx_hash,
+                "sender": sender,
+                "receiver": receiver,
+                "value": value_amount,
+                "asset_symbol": token_symbol or None,
+                "asset_address": token_addr.lower(),
+                "source_chain": route_name[:50],
+                "destination_chain": "QIE",
+                "bridge_address": token_addr.lower(),
+                "bridge_chain_name": route_name[:50],
+                "height": tt.get("block_number") or 1,
+                "status": "confirmed",
+                "timestamp": tt.get("timestamp"),
+                "_source": "block",
+            })
+
+        # Process general transactions (pending mempool, native QIE transfers, and verified contracts)
+        for item in tx_items:
             if not isinstance(item, dict):
                 continue
             tx_hash = item.get("hash")
-            if not tx_hash:
+            if not tx_hash or tx_hash in seen_hashes:
                 continue
+            seen_hashes.add(tx_hash)
 
             from_obj = item.get("from") if isinstance(item.get("from"), dict) else {}
             to_obj = item.get("to") if isinstance(item.get("to"), dict) else {}
             sender = from_obj.get("hash") or "0x0000000000000000000000000000000000000000"
             receiver = to_obj.get("hash") or "0x0000000000000000000000000000000000000000"
 
-            # Determine real route / protocol name from verified contract or transaction type
-            to_name = to_obj.get("name")
-            tx_types = item.get("tx_types") or item.get("transaction_types") or []
-            method_name = item.get("method")
-            if to_name:
-                route_chain = str(to_name)
-            elif "token_transfer" in tx_types:
-                route_chain = "QIE Token Bridge"
-            elif "contract_call" in tx_types:
-                route_chain = f"QIE Contract ({method_name})" if method_name else "QIE Smart Contract"
-            else:
-                route_chain = "QIE Native Settlement"
-
-            # Parse value in QIE (10^18 aqie/wei)
             raw_val = item.get("value")
             value_qie = 0.0
             try:
                 if raw_val is not None:
-                    value_qie = int(str(raw_val)) / 1e18
+                    value_qie = round(int(str(raw_val)) / 1e18, 6)
             except (ValueError, TypeError):
                 value_qie = 0.0
 
-            # If native value is 0 (e.g. contract call or token transfer), inspect token transfers or fee
+            asset_symbol = "QIE"
+            asset_address = None
+            # Check embedded token_transfers or ERC-20 input data if native value is 0
             if value_qie <= 0:
-                token_transfers = item.get("token_transfers") or []
-                if isinstance(token_transfers, list) and token_transfers:
-                    first_tt = token_transfers[0] if isinstance(token_transfers[0], dict) else {}
-                    total_obj = first_tt.get("total") if isinstance(first_tt.get("total"), dict) else {}
-                    decimals = int(total_obj.get("decimals") or 18)
-                    raw_token_val = total_obj.get("value")
-                    if raw_token_val is not None:
+                embedded_tts = item.get("token_transfers") or []
+                if isinstance(embedded_tts, list) and embedded_tts:
+                    first_tt = embedded_tts[0] if isinstance(embedded_tts[0], dict) else {}
+                    t_obj = first_tt.get("total") if isinstance(first_tt.get("total"), dict) else {}
+                    token = first_tt.get("token") or {}
+                    raw_decimals = t_obj.get("decimals", token.get("decimals"))
+                    dec = int(raw_decimals) if raw_decimals is not None else None
+                    if t_obj.get("value") is not None and dec is not None:
                         try:
-                            value_qie = int(str(raw_token_val)) / (10 ** decimals)
+                            value_qie = round(int(str(t_obj["value"])) / (10 ** dec), 6)
+                            asset_symbol = token.get("symbol")
+                            asset_address = token.get("address_hash") or token.get("address")
                         except (ValueError, TypeError):
                             pass
 
-            if value_qie <= 0:
-                fee_obj = item.get("fee") if isinstance(item.get("fee"), dict) else {}
-                raw_fee = fee_obj.get("value")
-                try:
-                    if raw_fee is not None:
-                        # Scale fee into a representative transaction metric so contract calls are non-zero
-                        value_qie = round((int(str(raw_fee)) / 1e18) * 1000.0, 6)
-                except (ValueError, TypeError):
-                    value_qie = 0.001
+            # Dynamically determine route & bridge contract from real on-chain recipient metadata
+            is_contract = bool(
+                to_obj.get("is_contract")
+                or to_obj.get("is_verified")
+                or "contract_call" in (item.get("tx_types") or item.get("transaction_types") or [])
+            )
+            to_name = (
+                to_obj.get("name")
+                or (to_obj.get("implementations") or [{}])[0].get("name")
+                if isinstance(to_obj.get("implementations"), list) and to_obj.get("implementations")
+                else to_obj.get("name")
+            )
+            method_name = item.get("method")
+
+            if to_name:
+                route_chain = str(to_name).strip()[:50]
+                bridge_addr = receiver.lower()
+            elif is_contract and receiver:
+                short_addr = f"{receiver[:8]}...{receiver[-4:]}"
+                route_chain = (
+                    f"Contract {method_name} ({short_addr})"[:50]
+                    if method_name
+                    else f"Smart Contract ({short_addr})"
+                )
+                bridge_addr = receiver.lower()
+            else:
+                route_chain = "QIE Native Transfer"
+                bridge_addr = "bridge:qie:native-transfer"
+
+            status_raw = str(item.get("status") or "").lower()
+            result_raw = str(item.get("result") or "").lower()
+            block_num = item.get("block") or item.get("block_number")
+
+            if block_num is None or status_raw == "pending" or result_raw == "pending":
+                tx_source = "mempool"
+                tx_status = "pending"
+            elif status_raw in ("error", "failed", "reverted") or result_raw in ("error", "failed", "reverted"):
+                tx_source = "block"
+                tx_status = "failed"
+            else:
+                tx_source = "block"
+                tx_status = "confirmed"
 
             normalized_list.append({
                 "hash": tx_hash,
                 "sender": sender,
                 "receiver": receiver,
-                "value": round(max(value_qie, 0.0001), 6),
+                "value": value_qie,
+                "asset_symbol": asset_symbol,
+                "asset_address": asset_address,
                 "source_chain": route_chain,
                 "destination_chain": "QIE",
-                "bridge_address": receiver,
+                "bridge_address": bridge_addr,
                 "bridge_chain_name": route_chain,
-                "height": item.get("block") or item.get("block_number") or 1,
+                "height": block_num if tx_source == "block" else None,
+                "status": tx_status,
                 "timestamp": item.get("timestamp"),
-                "_source": "block",
+                "_source": tx_source,
             })
+
+            if len(normalized_list) >= limit:
+                break
 
         return normalized_list
 
-    def get_live_network_validators(self, timeout: int = 4) -> List[Dict[str, Any]]:
+    def get_live_network_validators(self, timeout: int = 5) -> List[Dict[str, Any]]:
         """
-        Discover real QIE Mainnet validators from recent explorer blocks and
-        on-chain EVM block proposers, querying their live QIE stake/balance.
+        Fetch real QIE Mainnet validators (both active/online and inactive/offline)
+        directly from the QIE Cosmos SDK staking module and validator directory.
         """
-        blocks: List[Dict[str, Any]] = []
-        for path in ("/blocks?type=block", "/main-page/blocks"):
-            url = f"{self.explorer_api_url}{path}"
-            try:
-                resp = requests.get(url, timeout=timeout, verify=False)
-                if resp.ok:
-                    payload = resp.json()
-                    if isinstance(payload, list):
-                        blocks.extend(payload)
-                    elif isinstance(payload, dict) and isinstance(payload.get("items"), list):
-                        blocks.extend(payload["items"])
-            except Exception as exc:
-                logger.debug(f"QIE explorer blocks fetch failed ({url}): {exc}")
-
-        proposer_counts: Dict[str, int] = {}
-        proposer_names: Dict[str, str] = {}
-        latest_proposers: set[str] = set()
-
-        for idx, blk in enumerate(blocks):
-            if not isinstance(blk, dict):
-                continue
-            miner = blk.get("miner") if isinstance(blk.get("miner"), dict) else {}
-            addr = (miner.get("hash") or "").strip()
-            if not addr:
-                continue
-            addr_low = addr.lower()
-            proposer_counts[addr_low] = proposer_counts.get(addr_low, 0) + 1
-            if idx < 12:
-                latest_proposers.add(addr_low)
-            name = miner.get("name") or miner.get("ens_domain_name")
-            if name:
-                proposer_names[addr_low] = str(name)
-
-        # Fallback: also inspect latest EVM block via JSON-RPC if explorer returned nothing
-        if not proposer_counts:
-            latest_blk = self.get_evm_latest_block(full_transactions=False, timeout=3)
-            miner_addr = (latest_blk.get("miner") or "").strip()
-            if miner_addr:
-                addr_low = miner_addr.lower()
-                proposer_counts[addr_low] = 1
-                latest_proposers.add(addr_low)
-
-        total_blocks = max(sum(proposer_counts.values()), 1)
         validators_out: List[Dict[str, Any]] = []
 
-        for idx, (addr_low, blk_count) in enumerate(
-            sorted(proposer_counts.items(), key=lambda x: x[1], reverse=True)
-        ):
-            bal_res = self.query_evm_balance(addr_low, timeout=2)
-            stake_qie = 0.0
-            if bal_res.get("success"):
+        cosmos_urls = [
+            QIE_VALIDATOR_DIRECTORY_URL,
+            f"{QIE_COSMOS_REST_URL.rstrip('/')}/cosmos/staking/v1beta1/validators?pagination.limit=200",
+        ]
+        raw_validators: List[Dict[str, Any]] = []
+        for url in cosmos_urls:
+            try:
+                resp = requests.get(url, timeout=timeout)
+                if not resp.ok:
+                    continue
+                payload = resp.json()
+                if isinstance(payload, dict) and isinstance(payload.get("validators"), list):
+                    raw_validators = payload["validators"]
+                    if raw_validators:
+                        break
+            except Exception as exc:
+                logger.debug(f"Cosmos validator fetch failed ({url}): {exc}")
+
+        if raw_validators:
+            for item in raw_validators:
+                if not isinstance(item, dict):
+                    continue
+                addr = (
+                    item.get("operator_address")
+                    or item.get("address")
+                    or ""
+                ).strip()
+                if not addr:
+                    continue
+
+                desc = item.get("description") if isinstance(item.get("description"), dict) else {}
+                moniker = (
+                    item.get("moniker")
+                    or desc.get("moniker")
+                    or item.get("name")
+                    or addr[:16]
+                ).strip()
+
+                raw_tokens = item.get("tokens") or item.get("delegator_shares") or "0"
                 try:
-                    stake_qie = round(int(bal_res["balance"]) / 1e18, 2)
+                    token_str = str(raw_tokens).split(".")[0]
+                    stake_qie = round(int(token_str) / 1e18, 2)
                 except (ValueError, TypeError):
                     stake_qie = 0.0
-            if stake_qie <= 0:
-                # Derive effective validator stake weight from block proposal share (10,000+ QIE min stake)
-                stake_qie = round(10000.0 + (blk_count / total_blocks) * 40000.0, 2)
 
-            is_active = addr_low in latest_proposers or idx < max(len(proposer_counts) - 1, 1)
-            uptime = round(min(99.9, 96.5 + (blk_count / total_blocks) * 3.4), 2) if is_active else 88.5
-            short_suffix = addr_low[2:6].upper() if addr_low.startswith("0x") else addr_low[:4].upper()
-            val_name = proposer_names.get(addr_low) or f"QIE Validator #{idx + 1} ({short_suffix})"
+                status_str = str(item.get("status") or "").upper()
+                jailed = bool(item.get("jailed", False))
+                is_active = (
+                    not jailed
+                    and status_str in ("BOND_STATUS_BONDED", "BONDED", "3", "ACTIVE")
+                )
 
-            validators_out.append({
-                "address": addr_low,
-                "name": val_name,
-                "stake_amount": stake_qie,
-                "voting_power": round((blk_count / total_blocks) * 100.0, 2),
-                "uptime_percentage": uptime,
-                "is_active": is_active,
-                "blocks_proposed": blk_count,
-            })
+                uptime = None
+                missed_periods = item.get("missed_blocks_periods")
+                if isinstance(missed_periods, list) and missed_periods:
+                    last_period = missed_periods[-1] if isinstance(missed_periods[-1], dict) else {}
+                    blocks_win = float(last_period.get("blocks") or 0)
+                    missed = float(last_period.get("missed") or 0)
+                    if blocks_win > 0:
+                        uptime = round(max(0.0, min(100.0, ((blocks_win - missed) / blocks_win) * 100.0)), 2)
+
+                if uptime is None:
+                    signing = item.get("signing_info") if isinstance(item.get("signing_info"), dict) else {}
+                    missed_counter = signing.get("missed_blocks_counter")
+                    if missed_counter is not None:
+                        try:
+                            missed_val = float(missed_counter)
+                            uptime = round(max(0.0, min(100.0, ((10000.0 - missed_val) / 10000.0) * 100.0)), 2)
+                        except (ValueError, TypeError):
+                            uptime = None
+
+
+                validators_out.append({
+                    "address": addr,
+                    "name": moniker,
+                    "stake_amount": stake_qie,
+                    "voting_power": 0.0,
+                    "uptime_percentage": uptime,
+                    "is_active": is_active,
+                })
+
+            validators_out.sort(key=lambda v: (v["is_active"], v["stake_amount"]), reverse=True)
+            active_stake = sum(v["stake_amount"] for v in validators_out if v["is_active"]) or 1.0
+            for v in validators_out:
+                v["voting_power"] = (
+                    round((v["stake_amount"] / active_stake) * 100.0, 2)
+                    if v["is_active"]
+                    else 0.0
+                )
+            return validators_out
 
         return validators_out
 
@@ -463,6 +609,10 @@ class QIENodeManager:
         if isinstance(tx, dict):
             return {"found": True, "data": tx, "message": "Transaction found"}
         return {"found": False, "data": {}, "message": "Transaction not found"}
+
+    def get_evm_transaction_receipt(self, tx_hash: str, timeout: int = 3):
+        """Execution result; inclusion in a block alone does not imply success."""
+        return self.evm_rpc_call("eth_getTransactionReceipt", [tx_hash], timeout=timeout)
 
     def query_evm_balance(self, address: str, timeout: int = 3) -> Dict[str, Any]:
         """Query a 0x account balance via standard EVM eth_getBalance."""
@@ -708,8 +858,7 @@ class QIENodeManager:
         ):
             return self._validator_set_cache["result"]
 
-        # When connected to a public QIE gateway (not port 26657), derive live validator voting power
-        if ":26657" not in self.rpc_url and "qie.test" not in self.rpc_url:
+        if not self.uses_tendermint_rpc():
             if self.is_public_qie_gateway():
                 live_vals = self.get_live_network_validators()
                 if live_vals:
@@ -744,8 +893,7 @@ class QIENodeManager:
             for page in range(1, max_pages + 1):
                 response = requests.get(
                     f"{base_url}/validators",
-                    params={"page": page, "per_page": per_page},
-                    timeout=3,
+                    params={"page": page, "per_page": per_page}, timeout=3,
                 )
                 response.raise_for_status()
                 payload = response.json()

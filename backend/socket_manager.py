@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from datetime import datetime
+import time
+from threading import Lock
 from typing import Any, Dict
 
-from flask import Flask
+from flask import Flask, request
 from flask_socketio import SocketIO, join_room
 
 from core.severity import is_alerting_severity, severity_from_score
+from auth.jwt_auth import decode_token
 
 
 class SocketManager:
@@ -18,30 +21,50 @@ class SocketManager:
 
     def __init__(self, app: Flask) -> None:
         self.socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+        self._sessions = {}
+        self._lock = Lock()
         self.socketio.on_event("connect", self._on_connect)
+        self.socketio.on_event("disconnect", self._on_disconnect)
 
-    def _on_connect(self) -> None:
-        """Subscribe each connected dashboard client to the live feed."""
+    def _on_connect(self, auth=None):
+        """Authenticate before admitting a client to protected telemetry."""
+        token = auth.get("token") if isinstance(auth, dict) else None
+        payload = decode_token(token) if isinstance(token, str) else None
+        if payload is None or not payload.get("sub") or not payload.get("exp"):
+            return False
+        with self._lock:
+            self._sessions[request.sid] = payload["exp"]
         join_room(self.dashboard_room)
+
+    def _on_disconnect(self, reason=None):
+        with self._lock:
+            self._sessions.pop(request.sid, None)
+
+    def _emit(self, event, payload, **kwargs):
+        with self._lock:
+            expired = [sid for sid, expiry in self._sessions.items() if expiry <= time.time()]
+        for sid in expired:
+            self.socketio.server.disconnect(sid, namespace="/")
+        self.socketio.emit(event, payload, **kwargs)
 
     def emit_transaction(self, transaction: Dict[str, Any]) -> None:
         """Publish a committed transaction and its anomaly/alert derivatives."""
         payload = self._transaction_payload(transaction)
-        self.socketio.emit("new_transaction", payload, to=self.dashboard_room)
+        self._emit("new_transaction", payload, to=self.dashboard_room)
 
         if payload["anomaly_score"] is not None:
-            self.socketio.emit("new_anomaly", self._anomaly_payload(payload), to=self.dashboard_room)
+            self._emit("new_anomaly", self._anomaly_payload(payload), to=self.dashboard_room)
 
         if payload["is_flagged"] or is_alerting_severity(payload["severity"]):
-            self.socketio.emit("new_alert", self._alert_payload(payload), to=self.dashboard_room)
+            self._emit("new_alert", self._alert_payload(payload), to=self.dashboard_room)
 
     def emit_node_status(self, status: Dict[str, Any]) -> None:
         """Publish the latest node-health snapshot to dashboard clients."""
-        self.socketio.emit("node_status", status, to=self.dashboard_room)
+        self._emit("node_status", status, to=self.dashboard_room)
 
     def emit_alert_resolved(self, alert: Dict[str, Any]) -> None:
         """Publish a committed alert resolution."""
-        self.socketio.emit("alert_resolved", alert, to=self.dashboard_room)
+        self._emit("alert_resolved", alert, to=self.dashboard_room)
 
     @staticmethod
     def _transaction_payload(transaction: Dict[str, Any]) -> Dict[str, Any]:
@@ -56,6 +79,10 @@ class SocketManager:
             "alert_id": transaction.get("alert_id"),
             "tx_hash": transaction.get("tx_hash"),
             "value": transaction.get("value"),
+            "asset_symbol": transaction.get("asset_symbol"),
+            "asset_address": transaction.get("asset_address"),
+            "is_update": transaction.get("is_update", False),
+            "inference_latency_ms": transaction.get("inference_latency_ms"),
             "sender": transaction.get("sender"),
             "receiver": transaction.get("receiver"),
             "status": transaction.get("status"),

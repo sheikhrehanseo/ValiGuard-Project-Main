@@ -81,6 +81,11 @@ async function ensureFreshToken() {
  * Returns the raw Response; callers decide how to handle status codes.
  */
 export async function authedFetch(path, options = {}) {
+    // Requests arriving during refresh must wait too, even while storage is empty.
+    if (reauthInFlight) {
+        try { await reauthInFlight; } catch (_) { /* Return the server's 401 below. */ }
+    }
+    const originalToken = getToken();
     const doFetch = () => {
         const token = getToken();
         const headers = {
@@ -93,10 +98,13 @@ export async function authedFetch(path, options = {}) {
 
     let res = await doFetch();
 
-    if (res.status === 401 && getToken() && walletContext) {
-        setToken(null);
+    if (res.status === 401 && walletContext) {
         try {
-            await ensureFreshToken();
+            if (reauthInFlight) {
+                await reauthInFlight;
+            } else if (!getToken() || getToken() === originalToken) {
+                await ensureFreshToken();
+            }
             res = await doFetch(); // retry once with the fresh token
         } catch (err) {
             console.error('Re-authentication failed:', err);

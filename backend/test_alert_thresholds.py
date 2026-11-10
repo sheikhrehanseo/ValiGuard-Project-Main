@@ -47,7 +47,10 @@ def threshold_context(tmp_path, monkeypatch):
     model = FixedScoreModel()
     monkeypatch.setattr(app_module, "db_manager", database)
     monkeypatch.setattr(app_module, "anomaly_model", model)
-    return app_module.app.test_client(), database, model
+    from auth.jwt_auth import create_token
+    client = app_module.app.test_client()
+    client.environ_base["HTTP_AUTHORIZATION"] = "Bearer " + create_token("0x" + "1" * 40)
+    return client, database, model
 
 
 @pytest.mark.parametrize(

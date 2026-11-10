@@ -46,6 +46,18 @@
 
 ### ⚡ Run ValiGuard (Canonical One-Command Launcher)
 
+For live QIE mainnet monitoring and MetaMask login, configure `.env` from
+`.env.example`, then run:
+
+```powershell
+.\venv\Scripts\python.exe scripts/check_live_connections.py
+.\venv\Scripts\python.exe start_project.py --no-browser
+```
+
+See [live connection and authentication notes](docs/LIVE_CONNECTIONS.md) for the
+data sources, migration behavior, and verification commands. The demo commands
+below explicitly use simulated data.
+
 The canonical way to launch the full stack (Flask backend on port 5000, Alembic migrations, Next.js frontend on port 3001, and optional live traffic simulation) is using the project venv Python:
 
 ```powershell

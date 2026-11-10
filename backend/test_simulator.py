@@ -95,7 +95,7 @@ def test_payloads_are_reproducible_with_seed():
 
 # --- submit() target endpoint ----------------------------------------------
 
-def test_simulator_submit_uses_open_anomaly_endpoint(monkeypatch):
+def test_simulator_submit_uses_authenticated_anomaly_endpoint(monkeypatch):
     simulator = load_simulator()
     captured = {}
 
@@ -105,11 +105,12 @@ def test_simulator_submit_uses_open_anomaly_endpoint(monkeypatch):
         def json(self):
             return {"data": {"severity": "medium", "anomaly_score": 45}}
 
-    def fake_post(url, json, timeout):
+    def fake_post(url, json, timeout, headers):
         captured.update({"url": url, "json": json, "timeout": timeout})
         return Response()
 
     monkeypatch.setattr(simulator.requests, "post", fake_post)
+    monkeypatch.setattr(simulator, "_get_auth_token", lambda *_: "test-token")
     payload = simulator.normal_payload(random.Random(1))
     result = simulator.submit("http://localhost:5000", payload)
 

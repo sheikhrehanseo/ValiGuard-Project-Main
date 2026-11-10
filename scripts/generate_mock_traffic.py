@@ -2,7 +2,7 @@
 """
 ValiGuard AI traffic simulator — HTTP-only demo traffic.
 
-Every request goes through Flask's open /api/v1/bridge/anomaly-score
+Every request goes through Flask's authenticated /api/v1/bridge/anomaly-score
 endpoint, then through the shared scorer (core/scoring.py), database, and
 Socket.IO event path. No backend modules are imported and no database
 writes are performed here — the point is to exercise the full stack.
@@ -206,6 +206,30 @@ def build_payloads(scenario: str, rng: random.Random) -> List[Dict]:
 
 # --- HTTP client --------------------------------------------------------------
 
+_auth_tokens = {}
+
+
+def _get_auth_token(api_url, timeout):
+    if api_url in _auth_tokens:
+        return _auth_tokens[api_url]
+    from eth_account import Account
+    from eth_account.messages import encode_defunct
+    wallet = Account.create()
+    base = api_url.rstrip('/')
+    nonce = requests.post(base + '/api/v1/auth/request-nonce',
+                          json={"address": wallet.address}, timeout=timeout)
+    nonce.raise_for_status()
+    challenge = nonce.json()["data"]
+    signature = wallet.sign_message(encode_defunct(text=challenge["message"])).signature.hex()
+    verified = requests.post(base + '/api/v1/auth/verify', json={
+        "address": wallet.address, "nonce": challenge["nonce"], "signature": signature,
+    }, timeout=timeout)
+    verified.raise_for_status()
+    token = verified.json()["data"]["token"]
+    _auth_tokens[api_url] = token
+    return token
+
+
 def submit(api_url: str, payload: Dict,
            timeout: float = 10.0) -> ScenarioResult:
     """
@@ -217,8 +241,15 @@ def submit(api_url: str, payload: Dict,
         response = requests.post(
             f"{api_url.rstrip('/')}{ENDPOINT_PATH}",
             json=payload,
+            headers={"Authorization": "Bearer " + _get_auth_token(api_url, timeout)},
             timeout=timeout,
         )
+        if response.status_code == 401:
+            _auth_tokens.pop(api_url, None)
+            response = requests.post(
+                f"{api_url.rstrip('/')}{ENDPOINT_PATH}", json=payload,
+                headers={"Authorization": "Bearer " + _get_auth_token(api_url, timeout)}, timeout=timeout,
+            )
     except requests.RequestException:
         return ScenarioResult(scenario="", severity=None, status_code=0,
                                data={})
