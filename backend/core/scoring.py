@@ -282,6 +282,12 @@ def score_and_persist_transaction(
         if not existing_alert.is_resolved:
             existing_alert.severity = _severity_enum(severity)
             existing_alert.message = alert_message
+            if not flagged:
+                existing_alert.is_resolved = True
+                existing_alert.resolved_at = datetime.utcnow()
+                existing_alert.message = _truncate_text(
+                    f"Automatically resolved: score below alert threshold. {alert_message}", 500
+                )
             alert = existing_alert
         else:
             # Resolved alert: operator has already acted. Create NO new alert.

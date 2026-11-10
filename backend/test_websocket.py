@@ -129,7 +129,7 @@ def test_low_score_emits_transaction_without_alert(stage3_context):
     received = _events(socket_client)
     names = [item["name"] for item in received]
     assert "new_transaction" in names
-    assert "new_anomaly" in names
+    assert "new_anomaly" not in names
     assert "new_alert" not in names
 
 

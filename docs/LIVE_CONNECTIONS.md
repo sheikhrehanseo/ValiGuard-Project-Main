@@ -49,8 +49,23 @@ simulator also signs in using a temporary wallet; run it only in explicit demo m
 
 ## Data meaning
 
+- Open Anomalies (24h) counts distinct transactions with an unresolved Medium,
+  High, or Critical anomaly alert first created in the preceding 24 hours.
+  Low scores are normal. Resolving an alert removes it from this card but retains
+  the audit record. Confirmation updates do not reopen resolved alerts; a score
+  downgrade below Medium automatically resolves the existing alert with a reason.
+- The card refreshes from the database after single/bulk resolution and live
+  updates. Repeated events cannot increment it twice. Alert history has paginated
+  access to every matching record, with filters applied by the server.
+- Low-risk Scored (Today) is the percentage of scored transactions below the
+  Medium threshold for the current UTC day. Unscored transactions are excluded;
+  no scores means unavailable. This metric does not indicate chain confirmation.
+- Wallet balances come from the configured QIE backend regardless of MetaMask's
+  selected network. Failed balance lookups show unavailable rather than zero.
 - Amounts retain their asset symbol and contract address. Native QIE volume is
   summed separately from token quantities; route tables also display token totals.
+  Explicit aqie/wei and uqie units are converted at every amount size, including
+  fractional QIE values. Existing stored amounts are not guessed or rescaled.
 - ML amount/frequency baselines are maintained separately for each asset.
 - ML latency is measured by the backend. Peak observed TPS is the largest count
   of stored transactions in one second for the selected UTC day; it is not a claim

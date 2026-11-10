@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
     Shield,
     Activity,
@@ -199,6 +199,12 @@ export default function Dashboard() {
 
     // Alerts Tab Search, History & Multi-Select State
     const [alertHistory, setAlertHistory] = useState([]);
+    const [alertPage, setAlertPage] = useState(1);
+    const [alertTotal, setAlertTotal] = useState(0);
+    const alertRequest = useRef(0);
+    const anomalyRequest = useRef(0);
+    const refreshAlertDataRef = useRef(null);
+    const ALERT_PAGE_SIZE = 50;
     const [alertFilterSeverity, setAlertFilterSeverity] = useState('');
     const [alertFilterResolved, setAlertFilterResolved] = useState('');
     const [alertFilterTxHash, setAlertFilterTxHash] = useState('');
@@ -281,6 +287,19 @@ export default function Dashboard() {
         }
     }, [dataSource, walletAddress, txPage]);
 
+    const fetchAnomalyCount = useCallback(async () => {
+        if (dataSource !== 'REAL' || !(walletAddress || isAuthenticated())) return;
+        const requestId = ++anomalyRequest.current;
+        try {
+            const res = await authedFetch('/api/v1/analytics/open-anomalies');
+            if (!res.ok) return;
+            const body = await res.json();
+            if (body.success && requestId === anomalyRequest.current) {
+                setStats(prev => ({ ...prev, anomalies24h: body.data.open_anomalies_24h }));
+            }
+        } catch (error) { console.warn('Anomaly count refresh failed:', error); }
+    }, [dataSource, walletAddress]);
+
     // Authenticated data fetcher (runs only when wallet is connected)
     const fetchProtectedRealData = useCallback(async () => {
         const authed = typeof window !== 'undefined' && (!!walletAddress || isAuthenticated());
@@ -289,6 +308,7 @@ export default function Dashboard() {
         try {
             setBackendStatus('online');
 
+            fetchAnomalyCount();
             // 1. Fetch Daily Stats
             const statsRes = await authedFetch('/api/v1/analytics/daily-stats');
             let statsData = null;
@@ -303,8 +323,7 @@ export default function Dashboard() {
                     setStats(prev => ({
                         ...prev,
                         activeBridges: statsData.data.active_bridges ?? prev.activeBridges,
-                        anomalies24h: statsData.data.anomalies_detected ?? prev.anomalies24h,
-                        validationRate: statsData.data.validation_success_rate ?? null
+                        validationRate: statsData.data.low_risk_rate ?? null
                     }));
                 }
             }
@@ -387,7 +406,7 @@ export default function Dashboard() {
         } catch (error) {
             console.warn("Protected telemetry fetch warning:", error);
         }
-    }, [walletAddress, txPage, volumeHistory.length, fetchTransactionPage]);
+    }, [walletAddress, txPage, volumeHistory.length, fetchTransactionPage, fetchAnomalyCount]);
 
     // When user clicks a transaction page number in REAL mode, fetch immediately
     useEffect(() => {
@@ -397,12 +416,13 @@ export default function Dashboard() {
     }, [txPage, dataSource, walletAddress, fetchTransactionPage]);
 
     // Fetch Alerts with filter criteria
-    const fetchFilteredAlerts = useCallback(async () => {
+    const fetchFilteredAlerts = useCallback(async ({ silent = false } = {}) => {
         if (dataSource === 'MOCK') return;
         const authed = typeof window !== 'undefined' && (!!walletAddress || isAuthenticated());
         if (!authed) return;
 
-        setAlertsLoading(true);
+        const requestId = ++alertRequest.current;
+        if (!silent) setAlertsLoading(true);
         try {
             const params = new URLSearchParams();
             if (alertFilterSeverity) params.set('severity', alertFilterSeverity);
@@ -410,22 +430,34 @@ export default function Dashboard() {
             if (alertFilterTxHash.trim()) params.set('tx_hash', alertFilterTxHash.trim());
             if (alertFilterFrom) params.set('from', alertFilterFrom);
             if (alertFilterTo) params.set('to', alertFilterTo);
-            params.set('limit', '50');
+            params.set('limit', String(ALERT_PAGE_SIZE));
+            params.set('offset', String((alertPage - 1) * ALERT_PAGE_SIZE));
 
             const res = await authedFetch(`/api/v1/alerts?${params.toString()}`);
             if (res.ok) {
                 const data = await res.json();
                 const items = data.data?.alerts ?? data.data?.items;
-                if (data.success && Array.isArray(items)) {
+                if (data.success && Array.isArray(items) && requestId === alertRequest.current) {
                     setAlertHistory(items);
+                    setAlertTotal(data.data.total);
+                    const lastPage = Math.max(1, Math.ceil(data.data.total / ALERT_PAGE_SIZE));
+                    if (alertPage > lastPage) setAlertPage(lastPage);
                 }
             }
         } catch (error) {
             console.warn("Failed to query alerts:", error);
         } finally {
-            setAlertsLoading(false);
+            if (requestId === alertRequest.current) setAlertsLoading(false);
         }
-    }, [dataSource, walletAddress, alertFilterSeverity, alertFilterResolved, alertFilterTxHash, alertFilterFrom, alertFilterTo]);
+    }, [dataSource, walletAddress, alertPage, alertFilterSeverity, alertFilterResolved, alertFilterTxHash, alertFilterFrom, alertFilterTo]);
+
+    useEffect(() => {
+        setAlertPage(1);
+        setSelectedAlertIds([]);
+    }, [alertFilterSeverity, alertFilterResolved, alertFilterTxHash, alertFilterFrom, alertFilterTo]);
+
+    refreshAlertDataRef.current = () => Promise.all([fetchAnomalyCount(), fetchFilteredAlerts({ silent: true })]);
+
 
     // Handle Single Alert Resolution
     const handleResolveAlert = async (alertId) => {
@@ -439,9 +471,12 @@ export default function Dashboard() {
         try {
             const res = await authedFetch(`/api/v1/alerts/${alertId}/resolve`, { method: 'PATCH' });
             if (res.ok) {
+                ++anomalyRequest.current;
+                ++alertRequest.current;
                 setLiveAlerts(prev => prev.map(a => (a.id === alertId || a.alert_id === alertId) ? { ...a, is_resolved: true } : a));
                 setAlertHistory(prev => prev.map(a => (a.id === alertId || a.alert_id === alertId) ? { ...a, is_resolved: true } : a));
                 setSelectedAlertIds(prev => prev.filter(id => id !== alertId));
+                await refreshAlertDataRef.current();
             }
         } catch (err) {
             console.warn("Failed to resolve alert:", err);
@@ -466,9 +501,12 @@ export default function Dashboard() {
                 body: JSON.stringify({ alert_ids: idsToResolve }),
             });
             if (res.ok) {
+                ++anomalyRequest.current;
+                ++alertRequest.current;
                 setLiveAlerts(prev => prev.map(a => idsToResolve.includes(a.id ?? a.alert_id) ? { ...a, is_resolved: true } : a));
                 setAlertHistory(prev => prev.map(a => idsToResolve.includes(a.id ?? a.alert_id) ? { ...a, is_resolved: true } : a));
                 setSelectedAlertIds([]);
+                await refreshAlertDataRef.current();
             }
         } catch (err) {
             console.warn("Bulk alert resolution failed:", err);
@@ -723,6 +761,14 @@ export default function Dashboard() {
 
         const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
         let disposed = false;
+        let refreshTimer = null;
+        const scheduleAlertRefresh = () => {
+            if (refreshTimer !== null) return;
+            refreshTimer = setTimeout(() => {
+                refreshTimer = null;
+                if (!disposed) refreshAlertDataRef.current?.();
+            }, 150);
+        };
         const socket = io(API_BASE, {
             transports: ['websocket', 'polling'],
             auth: callback => callback({ token: getToken() }),
@@ -744,6 +790,7 @@ export default function Dashboard() {
         });
 
         socket.on('new_transaction', (tx) => {
+            scheduleAlertRefresh();
             const incomingRow = {
                 hash: tx.tx_hash ? `${tx.tx_hash.substring(0, 10)}...` : '—',
                 full_hash: tx.tx_hash,
@@ -796,7 +843,7 @@ export default function Dashboard() {
         });
 
         socket.on('new_anomaly', (anomaly) => {
-            setStats(prev => ({ ...prev, anomalies24h: (prev.anomalies24h || 0) + 1 }));
+            scheduleAlertRefresh();
             setTransactions(prev => prev.map(tx => (
                 tx.full_hash === anomaly.tx_hash
                     ? { ...tx, severity: anomaly.severity }
@@ -811,16 +858,12 @@ export default function Dashboard() {
                 alert_id: alert.alert_id ?? alert.id,
                 timestamp: alert.timestamp || alert.created_at,
             };
-            setLiveAlerts(prev => [incoming, ...prev].slice(0, 20));
-            setAlertHistory(prev => {
-                if (prev.some(item => (item.id && item.id === incoming.id) || (item.tx_hash && item.tx_hash === incoming.tx_hash))) {
-                    return prev;
-                }
-                return [incoming, ...prev].slice(0, 50);
-            });
+            setLiveAlerts(prev => [incoming, ...prev.filter(item => item.alert_id !== incoming.alert_id)].slice(0, 20));
+            scheduleAlertRefresh();
         });
 
         socket.on('alert_resolved', (resolved) => {
+            scheduleAlertRefresh();
             setLiveAlerts(prev => prev.filter(alert => (
                 alert.id !== resolved.alert_id && alert.alert_id !== resolved.alert_id && alert.tx_hash !== resolved.tx_hash
             )));
@@ -840,7 +883,7 @@ export default function Dashboard() {
             }));
         });
 
-        return () => { disposed = true; socket.disconnect(); };
+        return () => { disposed = true; clearTimeout(refreshTimer); socket.disconnect(); };
     }, [dataSource, txPage, walletAddress]);
 
     const isAuthed = mounted && (dataSource === 'MOCK' || (typeof window !== 'undefined' && (!!walletAddress || isAuthenticated())));
@@ -856,6 +899,17 @@ export default function Dashboard() {
     } : { low: 0, medium: 0, high: 0, critical: 0 };
 
     const hasTrafficVolume = volumeHistory.some(v => v.count > 0);
+
+    useEffect(() => {
+        if (dataSource !== 'MOCK') return;
+        const now = Date.now();
+        const open = new Set(alertHistory.filter(alert => {
+            const created = parseUtcDate(alert.created_at || alert.timestamp)?.getTime();
+            return !alert.is_resolved && ['medium', 'high', 'critical'].includes(alert.severity)
+                && created >= now - 86400000 && created <= now;
+        }).map(alert => alert.tx_hash || alert.id || alert.alert_id));
+        setStats(prev => ({ ...prev, anomalies24h: open.size }));
+    }, [dataSource, alertHistory]);
 
     // Paginated slices for Transactions (in MOCK mode), Bridge Routes, and Validators
     const totalTxPages = Math.max(1, Math.ceil((dataSource === 'MOCK' ? transactions.length : txTotal) / TX_PAGE_SIZE));
@@ -878,6 +932,7 @@ export default function Dashboard() {
 
     // Active Filtered Alerts for UI display
     const displayedAlerts = useMemo(() => {
+        if (dataSource === 'REAL') return alertHistory;
         const base = alertHistory.length > 0 ? alertHistory : liveAlerts;
         return base.filter(alert => {
             if (alertFilterSeverity && (alert.severity || '').toLowerCase() !== alertFilterSeverity.toLowerCase()) {
@@ -914,7 +969,7 @@ export default function Dashboard() {
             }
             return true;
         });
-    }, [alertHistory, liveAlerts, alertFilterSeverity, alertFilterResolved, alertFilterTxHash, alertFilterFrom, alertFilterTo]);
+    }, [dataSource, alertHistory, liveAlerts, alertFilterSeverity, alertFilterResolved, alertFilterTxHash, alertFilterFrom, alertFilterTo]);
 
     const unresolvedDisplayedIds = useMemo(
         () => displayedAlerts.filter(a => !a.is_resolved && (a.id ?? a.alert_id)).map(a => a.id ?? a.alert_id),
@@ -1099,8 +1154,8 @@ export default function Dashboard() {
                                     {/* Metrics Grid */}
                                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                                         <MetricCard label="Active Bridges" value={stats.activeBridges ?? '—'} icon={Boxes} color="blue" />
-                                        <MetricCard label="Anomalies (24h)" value={stats.anomalies24h ?? '—'} icon={AlertTriangle} color="red" />
-                                        <MetricCard label="Validation Rate" value={stats.validationRate == null ? '—' : `${stats.validationRate}%`} icon={CheckCircle} color="green" />
+                                        <MetricCard label="Open Anomalies (24h)" description="Unresolved Medium, High and Critical alerts from the last 24 hours" value={stats.anomalies24h ?? '—'} icon={AlertTriangle} color="red" />
+                                        <MetricCard label="Low-risk Scored (Today)" description="Share of scored transactions below Medium risk today (UTC)" value={stats.validationRate == null ? '—' : `${stats.validationRate}%`} icon={CheckCircle} color="green" />
                                         <MetricCard label="Model Accuracy" value={stats.modelAccuracy == null ? '—' : `${stats.modelAccuracy}%`} icon={TrendingUp} color="purple" />
                                     </div>
 
@@ -1734,6 +1789,15 @@ export default function Dashboard() {
                                             })}
                                         </div>
                                     )}
+                                    {isAuthed && dataSource === 'REAL' && (
+                                        <div className="flex items-center justify-between text-sm text-slate-300">
+                                            <span>{alertTotal} alerts - Page {alertPage} of {Math.max(1, Math.ceil(alertTotal / ALERT_PAGE_SIZE))}</span>
+                                            <div className="flex gap-2">
+                                                <button disabled={alertsLoading || alertPage <= 1} onClick={() => { setSelectedAlertIds([]); setAlertPage(p => p - 1); }} className="px-3 py-2 rounded bg-slate-700 disabled:opacity-40">Previous</button>
+                                                <button disabled={alertsLoading || alertPage * ALERT_PAGE_SIZE >= alertTotal} onClick={() => { setSelectedAlertIds([]); setAlertPage(p => p + 1); }} className="px-3 py-2 rounded bg-slate-700 disabled:opacity-40">Next</button>
+                                            </div>
+                                        </div>
+                                    )}
                                 </motion.div>
                             )}
 
@@ -1991,7 +2055,7 @@ function PaginationControls({ currentPage, totalPages, onPageChange }) {
     );
 }
 
-function MetricCard({ label, value, icon: Icon, color }) {
+function MetricCard({ label, value, icon: Icon, color, description }) {
     const colors = {
         blue: 'text-blue-400 bg-blue-400/10',
         red: 'text-red-400 bg-red-400/10',
@@ -2005,6 +2069,7 @@ function MetricCard({ label, value, icon: Icon, color }) {
                 <div>
                     <p className="text-slate-400 text-sm font-medium">{label}</p>
                     <h3 className="text-3xl font-bold text-white mt-1">{value}</h3>
+                    {description && <p className="text-xs text-slate-400 mt-2">{description}</p>}
                 </div>
                 <div className={`p-3 rounded-xl ${colors[color]}`}>
                     <Icon className="w-6 h-6" />

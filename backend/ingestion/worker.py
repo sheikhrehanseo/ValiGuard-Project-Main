@@ -28,6 +28,7 @@ from core.scoring import score_and_persist_transaction
 # Phase 1 DB layer
 from database.db import DatabaseManager, DatabaseConfig
 from database.models import (
+    Alert,
     Bridge,
     BridgeStatus,
     SeverityLevel,
@@ -73,10 +74,10 @@ def _coerce_float(value: Any, default: Optional[float] = None) -> Optional[float
         denom = str(value.get("denom", "")).lower()
         parsed = _coerce_float(amt, default=default)
         if parsed is not None:
-            if denom == "aqie" and parsed >= 1e12:
-                return round(parsed / 1e18, 6)
-            if denom == "uqie" and parsed >= 1e6:
-                return round(parsed / 1e6, 6)
+            if denom == "aqie":
+                return parsed / 1e18
+            if denom == "uqie":
+                return parsed / 1e6
         return parsed
     if isinstance(value, str):
         s = value.strip()
@@ -85,23 +86,21 @@ def _coerce_float(value: Any, default: Optional[float] = None) -> Optional[float
         if s.startswith(("0x", "0X")):
             try:
                 raw_int = int(s, 16)
-                if raw_int >= 10**12:
-                    return round(float(raw_int) / 1e18, 6)
-                return float(raw_int)
+                return float(raw_int) / 1e18
             except ValueError:
                 return default
         lower = s.lower()
-        for suffix, divisor, threshold in (
-            ("aqie", 1e18, 1e12),
-            ("wei", 1e18, 1e12),
-            ("uqie", 1e6, 1e6),
-            ("qie", 1.0, 0.0),
+        for suffix, divisor in (
+            ("aqie", 1e18),
+            ("wei", 1e18),
+            ("uqie", 1e6),
+            ("qie", 1.0),
         ):
             if lower.endswith(suffix):
                 num_part = lower[: -len(suffix)].strip()
                 try:
                     val = float(num_part)
-                    return round(val / divisor, 6) if divisor > 1.0 and val >= threshold else val
+                    return val / divisor
                 except ValueError:
                     return default
         try:
@@ -625,8 +624,7 @@ class IngestionWorker:
         normalized["raw_entry"] = normalized.get("sender") is None
         if persisted.get("transaction") is not None:
             normalized["transaction_id"] = persisted["transaction"].id
-        if persisted.get("alert") is not None:
-            normalized["alert_id"] = persisted["alert"].id
+        normalized.update(persisted.get("alert_state", {}))
 
         if self.on_new_transaction is not None:
             try:
@@ -686,6 +684,13 @@ class IngestionWorker:
                     asset_address=normalized.get("asset_address"),
                 )
 
+                alert = session.query(Alert).filter_by(transaction_id=result["transaction"].id).first()
+                result["alert_state"] = {
+                    "alert_id": alert.id if alert else None,
+                    "is_resolved": alert.is_resolved if alert else False,
+                    "resolved_at": alert.resolved_at.isoformat() if alert and alert.resolved_at else None,
+                    "alert_created_at": alert.created_at.isoformat() if alert else None,
+                }
             return result
         except IntegrityError as exc:
             logger.warning("Transaction write failed: %s", normalized.get("tx_hash"))

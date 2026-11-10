@@ -936,9 +936,7 @@ class QIENodeManager:
         """Query account balance from the blockchain (supports Cosmos qie1... and EVM 0x... addresses)."""
         try:
             if isinstance(address, str) and address.startswith(("0x", "0X")):
-                evm_res = self.query_evm_balance(address)
-                if evm_res.get("success"):
-                    return evm_res
+                return self.query_evm_balance(address)
 
             query_result = self._rpc_call(
                 "abci_query",

@@ -52,11 +52,17 @@ class SocketManager:
         payload = self._transaction_payload(transaction)
         self._emit("new_transaction", payload, to=self.dashboard_room)
 
-        if payload["anomaly_score"] is not None:
+        if payload["anomaly_score"] is not None and is_alerting_severity(payload["severity"]):
             self._emit("new_anomaly", self._anomaly_payload(payload), to=self.dashboard_room)
 
-        if payload["is_flagged"] or is_alerting_severity(payload["severity"]):
-            self._emit("new_alert", self._alert_payload(payload), to=self.dashboard_room)
+        if payload["alert_id"] is not None:
+            if payload["is_resolved"]:
+                self.emit_alert_resolved({
+                    "alert_id": payload["alert_id"], "tx_hash": payload["tx_hash"],
+                    "is_resolved": True, "resolved_at": payload["resolved_at"],
+                })
+            elif is_alerting_severity(payload["severity"]):
+                self._emit("new_alert", self._alert_payload(payload), to=self.dashboard_room)
 
     def emit_node_status(self, status: Dict[str, Any]) -> None:
         """Publish the latest node-health snapshot to dashboard clients."""
@@ -77,6 +83,9 @@ class SocketManager:
         return {
             "id": transaction.get("transaction_id", transaction.get("id")),
             "alert_id": transaction.get("alert_id"),
+            "is_resolved": transaction.get("is_resolved", False),
+            "resolved_at": transaction.get("resolved_at"),
+            "alert_created_at": transaction.get("alert_created_at"),
             "tx_hash": transaction.get("tx_hash"),
             "value": transaction.get("value"),
             "asset_symbol": transaction.get("asset_symbol"),
@@ -121,6 +130,6 @@ class SocketManager:
             "risk_score": transaction["risk_score"],
             "reason": transaction["reason"],
             "message": f"Anomaly score {score_display} on {transaction['tx_hash']}",
-            "is_resolved": False,
-            "timestamp": transaction["timestamp"],
+            "is_resolved": transaction["is_resolved"],
+            "timestamp": transaction.get("alert_created_at") or transaction["timestamp"],
         }

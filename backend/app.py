@@ -20,11 +20,14 @@ from functools import wraps
 from typing import Dict, Any, Optional, List
 from collections import defaultdict
 
-# Ensure the backend/ directory is on sys.path so the `database` package
-# resolves regardless of how the app is launched.
+# Ensure both repo root and backend/ are on sys.path so imports like
+# `from database` and `from backend.qie_node_manager` resolve regardless of how the app is launched.
 _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.dirname(_BACKEND_DIR)
 if _BACKEND_DIR not in sys.path:
     sys.path.insert(0, _BACKEND_DIR)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -66,6 +69,7 @@ from auth.routes import register_auth_routes
 from core.severity import (
     SEVERITY_TIERS,
     is_alerting_severity,
+    SEVERITY_THRESHOLDS,
     severity_from_score as _canonical_severity_from_score,
 )
 from core.scoring import score_and_persist_transaction
@@ -962,7 +966,7 @@ def get_alerts():
             query = query.filter(Transaction.tx_hash.ilike(f"%{request.args['tx_hash']}%"))
 
         total = int(query.count() or 0)
-        rows = query.order_by(Alert.created_at.desc()).offset(offset).limit(limit).all()
+        rows = query.order_by(Alert.created_at.desc(), Alert.id.desc()).offset(offset).limit(limit).all()
         items = []
         for alert in rows:
             anomaly = max(
@@ -1000,15 +1004,17 @@ def resolve_alert(alert_id: int):
         alert = session.query(Alert).filter_by(id=alert_id).first()
         if alert is None:
             return error_response("Alert not found", "ALERT_NOT_FOUND", request_id, 404)
-        alert.is_resolved = True
-        alert.resolved_at = resolved_at
+        if not alert.is_resolved:
+            alert.is_resolved = True
+            alert.resolved_at = resolved_at
+        resolved_at = alert.resolved_at
         tx_hash = alert.transaction.tx_hash
 
     payload = {
         "alert_id": alert_id,
         "tx_hash": tx_hash,
         "is_resolved": True,
-        "resolved_at": resolved_at.isoformat(),
+        "resolved_at": resolved_at.isoformat() if resolved_at else None,
     }
     socket_manager.emit_alert_resolved(payload)
     return jsonify(success_response(payload, request_id)), 200
@@ -1033,7 +1039,7 @@ def resolve_alerts_bulk():
     resolved_at = datetime.utcnow()
     resolved_payloads = []
     with db_manager.get_session() as session:
-        alerts = session.query(Alert).filter(Alert.id.in_(alert_ids)).all()
+        alerts = session.query(Alert).filter(Alert.id.in_(alert_ids), Alert.is_resolved.is_(False)).all()
         for alert in alerts:
             alert.is_resolved = True
             alert.resolved_at = resolved_at
@@ -1054,6 +1060,32 @@ def resolve_alerts_bulk():
 
 
 # ===== ANALYTICS ENDPOINTS =====
+def _open_anomalies_24h(session, now):
+    """Distinct currently actionable transactions first alerted in the last 24h."""
+    return session.query(Alert.transaction_id).join(Transaction).filter(
+        Alert.alert_type == AlertType.ANOMALY,
+        Alert.is_resolved.is_(False),
+        Alert.severity.in_([SeverityLevel.MEDIUM, SeverityLevel.HIGH, SeverityLevel.CRITICAL]),
+        Transaction.is_flagged.is_(True),
+        Alert.created_at >= now - timedelta(hours=24),
+        Alert.created_at <= now,
+    ).distinct().count()
+
+
+@app.route("/api/v1/analytics/open-anomalies", methods=["GET"])
+@rate_limit
+@require_auth
+def get_open_anomalies():
+    now = datetime.utcnow()
+    with db_manager.get_session() as session:
+        count = _open_anomalies_24h(session, now)
+    return jsonify(success_response({
+        "open_anomalies_24h": count,
+        "window_start": (now - timedelta(hours=24)).isoformat() + "Z",
+        "window_end": now.isoformat() + "Z",
+    }, generate_request_id())), 200
+
+
 @app.route("/api/v1/analytics/daily-stats", methods=["GET"])
 @rate_limit
 @require_auth
@@ -1077,20 +1109,19 @@ def get_daily_stats():
 
         anomalies_detected = int(session.query(AnomalyDetection).filter(
             AnomalyDetection.detected_at >= target_date,
-            AnomalyDetection.detected_at < next_date
+            AnomalyDetection.detected_at < next_date,
+            AnomalyDetection.severity.in_([SeverityLevel.MEDIUM, SeverityLevel.HIGH, SeverityLevel.CRITICAL]),
         ).count() or 0)
 
-        flagged_count = int(session.query(Transaction).filter(
+        open_anomalies_24h = _open_anomalies_24h(session, datetime.utcnow())
+        scored_query = session.query(Transaction).filter(
             Transaction.timestamp >= target_date,
             Transaction.timestamp < next_date,
-            Transaction.is_flagged == True
-        ).count() or 0)
-
-        validation_success_rate = (
-            round(((total_transactions - flagged_count) / total_transactions) * 100, 2)
-            if total_transactions > 0
-            else None
+            Transaction.anomaly_score.isnot(None),
         )
+        scored_count = scored_query.count()
+        low_risk_count = scored_query.filter(Transaction.anomaly_score < SEVERITY_THRESHOLDS["medium"]).count()
+        low_risk_rate = round(low_risk_count / scored_count * 100, 2) if scored_count else None
 
         avg_score_result = session.query(AnomalyDetection).filter(
             AnomalyDetection.detected_at >= target_date,
@@ -1154,7 +1185,10 @@ def get_daily_stats():
         "volume_unit": "QIE",
         "peak_tps": int(peak_tps) if peak_tps is not None else None,
         "anomalies_detected": anomalies_detected,
-        "validation_success_rate": validation_success_rate,
+        "open_anomalies_24h": open_anomalies_24h,
+        "scored_transactions": scored_count,
+        "low_risk_rate": low_risk_rate,
+        "validation_success_rate": low_risk_rate,  # Backward-compatible alias: risk screening, not chain execution.
         "avg_anomaly_score": avg_anomaly_score,
         "critical_alerts": critical_alerts,
         "high_alerts": high_alerts,

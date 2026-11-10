@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { ethers } from 'ethers';
+import { fetchQieBalance } from '../lib/walletBalance.mjs';
 import { User, Wallet, ShieldCheck } from 'lucide-react';
 import {
     authenticateWallet,
@@ -108,6 +109,7 @@ export default function WalletConnect({ onConnect }) {
             }
         } else {
             setWalletAddress(null);
+            ++balanceRequest.current;
             setBalance(null);
             setToken(null);
             clearWalletContext();
@@ -115,33 +117,16 @@ export default function WalletConnect({ onConnect }) {
         }
     };
 
+    const balanceRequest = useRef(0);
     const fetchBalance = async (address) => {
-        // 1. Try MetaMask BrowserProvider first
-        if (typeof window !== 'undefined' && window.ethereum) {
-            try {
-                const provider = new ethers.BrowserProvider(window.ethereum);
-                const bal = await provider.getBalance(address);
-                setBalance(ethers.formatEther(bal));
-                return;
-            } catch (err) {
-                // MetaMask RPC rate-limited (-32002) or unreachable; fall back to backend RPC
-                console.warn("MetaMask getBalance fallback to backend RPC:", err?.message || err);
-            }
-        }
-
-        // 2. Fallback to backend /api/v1/qie/account/<address>
+        const requestId = ++balanceRequest.current;
+        setBalance(null);
         try {
-            const res = await fetch(`${API_BASE}/api/v1/qie/account/${address}`);
-            if (res.ok) {
-                const body = await res.json();
-                const rawBal = body?.data?.balance || "0";
-                setBalance(ethers.formatEther(rawBal));
-                return;
-            }
-        } catch (fallbackErr) {
-            // Ignore and default to 0.0000
+            const value = await fetchQieBalance(API_BASE, address);
+            if (requestId === balanceRequest.current) setBalance(value);
+        } catch (err) {
+            console.warn('QIE balance unavailable:', err?.message || err);
         }
-        setBalance("0.0000");
     };
 
     const connectWallet = async () => {
@@ -185,6 +170,7 @@ export default function WalletConnect({ onConnect }) {
     };
 
     const disconnectWallet = () => {
+        ++balanceRequest.current;
         setWalletAddress(null);
         setBalance(null);
         setIsDemo(false);
@@ -220,7 +206,10 @@ export default function WalletConnect({ onConnect }) {
             {isAuthenticating && (
                 <div className="text-xs text-blue-400 mt-1 mr-1">Signing in...</div>
             )}
-            {walletAddress && balance && (
+            {walletAddress && balance === null && (
+                <div className="text-xs text-slate-400 mt-1 mr-1">QIE balance unavailable</div>
+            )}
+            {walletAddress && balance !== null && (
                 <div className="text-xs text-slate-400 mt-1 mr-1 font-mono">
                     {parseFloat(balance).toFixed(4)} QIE
                 </div>

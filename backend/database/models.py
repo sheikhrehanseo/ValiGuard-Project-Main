@@ -144,7 +144,7 @@ class Transaction(Base):
     receiver = Column(String(255), nullable=True)
     timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     status = Column(Enum(TransactionStatus), default=TransactionStatus.PENDING, nullable=False)
-    anomaly_score = Column(Float, default=0.0)
+    anomaly_score = Column(Float, nullable=True)
     is_flagged = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
